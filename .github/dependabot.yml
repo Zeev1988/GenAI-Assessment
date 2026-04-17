@@ -1,0 +1,30 @@
+version: 1
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    labels: ["dependencies", "python"]
+    groups:
+      azure-sdks:
+        patterns:
+          - "azure-*"
+      lint-and-typecheck:
+        patterns:
+          - "ruff"
+          - "mypy"
+          - "pre-commit"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels: ["dependencies", "ci"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    labels: ["dependencies", "docker"]
