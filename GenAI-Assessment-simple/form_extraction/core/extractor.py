@@ -4,9 +4,11 @@ The OCR stage (`form_extraction.core.ocr`) produces a two-part document:
 
   1. ``=== FORM 283 SPATIAL EXTRACTION ===`` — authoritative key/value pairs
      for every dated / numbered / checkbox field, derived from Azure Document
-     Intelligence polygon coordinates.  Each line is shaped like:
+     Intelligence's Markdown stream (label-anchored regex for dates / ID /
+     phones) and its polygon-based selection marks (for checkboxes).  Each
+     line is shaped like:
 
-         formReceiptDateAtClinic: 02021999  (day=02  month=02  year=1999)   [label 'תאריך קבלת הטופס בקופה' at x=6.20 y=0.90]
+         formReceiptDateAtClinic: 02021999  (day=02  month=02  year=1999)   [label 'תאריך קבלת הטופס בקופה']
 
      and the checkbox section lists one ``[SELECTED]`` line per selected mark
      with the resolved label and a single ``healthFundMember (resolved): …``
@@ -100,8 +102,11 @@ Rules
 3. Never infer a checkbox value from ☐/☒/:selected: symbols in the Markdown \
    body — those are unreliable under RTL.  Use ONLY the selected-checkbox \
    list and the "healthFundMember (resolved)" line from the spatial header.
-4. The spatial header is authoritative for idNumber even when the digit \
-   count is unusual.  Do NOT re-read the ID from the Markdown body.
+4. The spatial header is authoritative for idNumber.  Copy its digits \
+   verbatim, INCLUDING any leading zeros and EVEN IF the digit count is \
+   not 9.  A 10-digit ID (or any non-standard length) is a legitimate \
+   data-quality signal that a downstream validator will flag — do NOT \
+   truncate, pad, re-order, or re-derive the value from the Markdown body.
 5. For free-text fields that are genuinely absent from the Markdown body, \
    return "".  Never return null, "N/A", "-", or placeholder text.
 6. Preserve the original language of every value — Hebrew stays Hebrew, \
@@ -116,21 +121,22 @@ Rules
 FEW_SHOT_OCR = """\
 === FORM 283 SPATIAL EXTRACTION ===
 
-These values are derived from Azure Document Intelligence polygon
-coordinates (not from the RTL text stream).  They are authoritative
-for every dated / numbered / checkbox field on Form 283.  Use them
-verbatim and DO NOT re-derive from the markdown body below.
+These values are pre-computed from the Azure DI text stream
+(after spaced-digit collapse) and from polygon-based selection
+marks.  They are authoritative for every date / ID / phone /
+checkbox field on Form 283 — use them verbatim and do NOT
+re-derive from the markdown body below.
 
--- Dates (8 digit-boxes, read LEFT→RIGHT by X coordinate) --
-formReceiptDateAtClinic: (not found)   [label 'תאריך קבלת הטופס בקופה' at x=6.20 y=0.90]
-formFillingDate:         04042024  (day=04  month=04  year=2024)   [label 'תאריך מילוי הטופס' at x=1.80 y=0.90]
-dateOfInjury:            03042024  (day=03  month=04  year=2024)   [label 'תאריך הפגיעה' at x=6.40 y=1.95]
-dateOfBirth:             01021990  (day=01  month=02  year=1990)   [label 'תאריך לידה' at x=5.30 y=3.10]
+-- Dates (DDMMYYYY, extracted from the markdown after each label) --
+formReceiptDateAtClinic: (not found)   [label 'תאריך קבלת הטופס בקופה']
+formFillingDate:         04042024  (day=04  month=04  year=2024)   [label 'תאריך מילוי הטופס']
+dateOfInjury:            03042024  (day=03  month=04  year=2024)   [label 'תאריך הפגיעה']
+dateOfBirth:             01021990  (day=01  month=02  year=1990)   [label 'תאריך לידה']
 
--- Identifiers & phones (digit-boxes read LEFT→RIGHT) --
-idNumber:                011111111   [label 'ת.ז.' at x=3.10 y=2.90]
-mobilePhone:             0501234567   [label 'טלפון נייד' at x=2.20 y=5.20]
-landlinePhone:           (not found)   [label 'טלפון קווי' at x=5.80 y=5.20]
+-- Identifiers & phones --
+idNumber:                011111111   [label 'ת.ז.']
+mobilePhone:             0501234567   [label 'טלפון נייד']
+landlinePhone:           (not found)   [label 'טלפון קווי']
 
 -- Selected checkboxes (from Azure DI selection marks + directional label match) --
   [SELECTED] at (5.90, 3.05)  →  label: נקבה
@@ -243,16 +249,16 @@ FEW_SHOT_JSON = {
 FEW_SHOT_NEG_OCR = """\
 === FORM 283 SPATIAL EXTRACTION ===
 
--- Dates (8 digit-boxes, read LEFT→RIGHT by X coordinate) --
-formReceiptDateAtClinic: (not found)   [label 'תאריך קבלת הטופס בקופה' at x=6.20 y=0.90]
-formFillingDate:         (not found)   [label 'תאריך מילוי הטופס' at x=1.80 y=0.90]
-dateOfInjury:            10032024  (day=10  month=03  year=2024)   [label 'תאריך הפגיעה' at x=6.40 y=1.95]
-dateOfBirth:             15071985  (day=15  month=07  year=1985)   [label 'תאריך לידה' at x=5.30 y=3.10]
+-- Dates (DDMMYYYY, extracted from the markdown after each label) --
+formReceiptDateAtClinic: (not found)   [label 'תאריך קבלת הטופס בקופה']
+formFillingDate:         (not found)   [label 'תאריך מילוי הטופס']
+dateOfInjury:            10032024  (day=10  month=03  year=2024)   [label 'תאריך הפגיעה']
+dateOfBirth:             15071985  (day=15  month=07  year=1985)   [label 'תאריך לידה']
 
--- Identifiers & phones (digit-boxes read LEFT→RIGHT) --
-idNumber:                0222222222   [label 'ת.ז.' at x=3.10 y=2.90]
-mobilePhone:             0529876543   [label 'טלפון נייד' at x=2.20 y=5.20]
-landlinePhone:           (not found)   [label 'טלפון קווי' at x=5.80 y=5.20]
+-- Identifiers & phones --
+idNumber:                0222222222   [label 'ת.ז.']
+mobilePhone:             0529876543   [label 'טלפון נייד']
+landlinePhone:           (not found)   [label 'טלפון קווי']
 
 -- Selected checkboxes (from Azure DI selection marks + directional label match) --
   [SELECTED] at (5.90, 3.05)  →  label: זכר
