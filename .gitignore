@@ -10,7 +10,7 @@ venv/
 env/
 
 # Env & secrets
-.env
+GenAI-Assessment-simple/.env
 .env.*
 !.env.example
 
