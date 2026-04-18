@@ -4,3 +4,5 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .env
+# OCR cache — generated on first run, not committed (re-generate with RUN_AZURE_TESTS=1)
+tests/fixtures/ocr_cache/*.txt
