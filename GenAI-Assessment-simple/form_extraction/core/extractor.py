@@ -121,34 +121,29 @@ Rules
 FEW_SHOT_OCR = """\
 === FORM 283 SPATIAL EXTRACTION ===
 
-These values are pre-computed from the Azure DI text stream
-(after spaced-digit collapse) and from polygon-based selection
-marks.  They are authoritative for every date / ID / phone /
-checkbox field on Form 283 — use them verbatim and do NOT
+These values are pre-computed from Azure DI word coordinates.
+Each field was extracted by collecting all words whose centre
+falls inside a calibrated bounding-box region for that field.
+Checkboxes are resolved from polygon-based selection marks.
+They are authoritative — use them verbatim and do NOT
 re-derive from the markdown body below.
 
--- Dates (DDMMYYYY, extracted from the markdown after each label) --
-formReceiptDateAtClinic: (not found)   [label 'תאריך קבלת הטופס בקופה']
-formFillingDate:         04042024  (day=04  month=04  year=2024)   [label 'תאריך מילוי הטופס']
-dateOfInjury:            03042024  (day=03  month=04  year=2024)   [label 'תאריך הפגיעה']
-dateOfBirth:             01021990  (day=01  month=02  year=1990)   [label 'תאריך לידה']
+-- Dates (DDMMYYYY, extracted from fixed coordinate regions) --
+formReceiptDateAtClinic: (not found)
+formFillingDate:         04042024  (day=04  month=04  year=2024)
+dateOfInjury:            03042024  (day=03  month=04  year=2024)
+dateOfBirth:             01021990  (day=01  month=02  year=1990)
 
 -- Identifiers & phones --
-idNumber:                011111111   [label 'ת.ז.']
-mobilePhone:             0501234567   [label 'טלפון נייד']
-landlinePhone:           (not found)   [label 'טלפון קווי']
+idNumber:                011111111
+mobilePhone:             0501234567
+landlinePhone:           (not found)
 
 -- Selected checkboxes (from Azure DI selection marks + directional label match) --
   [SELECTED] at (5.90, 3.05)  →  label: נקבה
   [SELECTED] at (5.10, 6.10)  →  label: במפעל
 
 healthFundMember (resolved): (none — no fund checkbox selected)
-
-Rules for the extractor:
-  • For every date / ID / phone / gender / accidentLocation /
-    healthFundMember field above, copy the value from this header.
-  • If the header says '(not found)' or '(none...)' the corresponding
-    field must be "" (empty string).
 
 === FORM BODY (markdown OCR) ===
 
@@ -249,16 +244,23 @@ FEW_SHOT_JSON = {
 FEW_SHOT_NEG_OCR = """\
 === FORM 283 SPATIAL EXTRACTION ===
 
--- Dates (DDMMYYYY, extracted from the markdown after each label) --
-formReceiptDateAtClinic: (not found)   [label 'תאריך קבלת הטופס בקופה']
-formFillingDate:         (not found)   [label 'תאריך מילוי הטופס']
-dateOfInjury:            10032024  (day=10  month=03  year=2024)   [label 'תאריך הפגיעה']
-dateOfBirth:             15071985  (day=15  month=07  year=1985)   [label 'תאריך לידה']
+These values are pre-computed from Azure DI word coordinates.
+Each field was extracted by collecting all words whose centre
+falls inside a calibrated bounding-box region for that field.
+Checkboxes are resolved from polygon-based selection marks.
+They are authoritative — use them verbatim and do NOT
+re-derive from the markdown body below.
+
+-- Dates (DDMMYYYY, extracted from fixed coordinate regions) --
+formReceiptDateAtClinic: (not found)
+formFillingDate:         (not found)
+dateOfInjury:            10032024  (day=10  month=03  year=2024)
+dateOfBirth:             15071985  (day=15  month=07  year=1985)
 
 -- Identifiers & phones --
-idNumber:                0222222222   [label 'ת.ז.']
-mobilePhone:             0529876543   [label 'טלפון נייד']
-landlinePhone:           (not found)   [label 'טלפון קווי']
+idNumber:                0222222222
+mobilePhone:             0529876543
+landlinePhone:           (not found)
 
 -- Selected checkboxes (from Azure DI selection marks + directional label match) --
   [SELECTED] at (5.90, 3.05)  →  label: זכר
