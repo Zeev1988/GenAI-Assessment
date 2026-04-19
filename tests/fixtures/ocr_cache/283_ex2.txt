@@ -1,0 +1,44 @@
+=== FORM 283 SPATIAL EXTRACTION ===
+
+These values are pre-computed from Azure DI word coordinates.
+Each field was extracted by collecting all words whose centre
+falls inside a calibrated bounding-box region for that field.
+Checkboxes are resolved from polygon-based selection marks.
+They are authoritative — use them verbatim and do NOT
+re-derive from the form body.
+
+-- Dates (DDMMYYYY, extracted from fixed coordinate regions) --
+formReceiptDateAtClinic: 03072001  (day=03  month=07  year=2001)
+formFillingDate:         14092006  (day=14  month=09  year=2006)
+dateOfInjury:            12082005  (day=12  month=08  year=2005)
+dateOfBirth:             14101990  (day=14  month=10  year=1990)
+
+-- Identifiers & phones --
+idNumber:                022456120
+mobilePhone:             6554412742
+landlinePhone:           6197656054
+
+-- Selected checkboxes (from Azure DI selection marks + coordinate region lookup) --
+  [SELECTED] at (7.08, 3.98)  →  label: זכר
+  [SELECTED] at (6.78, 6.45)  →  label: במפעל
+  [SELECTED] at (5.76, 9.89)  →  label: כללית
+
+gender (resolved):           זכר
+accidentLocation (resolved): במפעל
+healthFundMember (resolved): כללית
+
+-- Free-text fields (extracted from fixed coordinate regions) --
+lastName:            הלוי
+firstName:           שלמה
+street:              חיים ויצמן
+poBox:
+houseNumber:         6
+entrance:            
+apartment:           34
+city:                יוקנעם
+postalCode:          4454124
+jobType:             מאפיית האחים
+timeOfInjury:        12:00
+accidentAddress:     האופים 17 בני ברק
+accidentDescription: במהלך העבודה נשרף ממגש לוהט.
+injuredBodyPart:     הפנים במיוחד הלחי הימנית

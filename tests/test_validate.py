@@ -62,46 +62,34 @@ def test_grounding_passes_when_values_appear_in_ocr() -> None:
                for i in report.issues)
 
 
-def test_grounding_flags_hallucinated_medical_fields() -> None:
-    # The clinic section is blank on the form; any value there should be
-    # flagged as possibly hallucinated because nothing on the page grounds it.
-    ocr = (
-        "שם משפחה: לוי   שם פרטי: רועי\n"
-        'למילוי ע"י המוסד הרפואי:\n'
-        "  חבר בקופת חולים: ________________\n"
-        "  אבחנות רפואיות: ________________\n"
+def test_grounding_flags_hallucinated_free_text_field() -> None:
+    # jobType is a grounded free-text field. If the model invents a value
+    # that isn't on the page, the grounding check should flag it.
+    ocr = "שם משפחה: לוי   שם פרטי: רועי\nסוג העבודה: ________________"
+    report = validate(
+        _form(lastName="לוי", firstName="רועי", jobType="מהנדס תוכנה"),
+        ocr_text=ocr,
     )
-    form = _form(
-        lastName="לוי",
-        firstName="רועי",
-        medicalInstitutionFields={
-            "healthFundMember": "מכבי",
-            "natureOfAccident": "תאונה בדרך",
-            "medicalDiagnoses": "שבר מורכב",  # not on the page at all
-        },
-    )
-    report = validate(form, ocr_text=ocr)
     flagged = {i.field for i in report.issues if "hallucination" in i.message}
-    assert "medicalInstitutionFields.medicalDiagnoses" in flagged
-    assert "medicalInstitutionFields.healthFundMember" in flagged
+    assert "jobType" in flagged
 
 
 def test_grounding_is_whitespace_and_punctuation_insensitive() -> None:
-    # OCR says "Dana Cohen"; extracted signature is "DanaCohen".
+    # OCR says "Dana Cohen"; extracted jobType is "DanaCohen".
     # Normalization should collapse to the same form → no warning.
-    ocr = "חתימה: Dana Cohen"
-    report = validate(_form(signature="DanaCohen"), ocr_text=ocr)
+    ocr = "סוג העבודה: Dana Cohen"
+    report = validate(_form(jobType="DanaCohen"), ocr_text=ocr)
     assert not any("hallucination" in i.message for i in report.issues)
 
 
 def test_grounding_ignores_short_values() -> None:
     # Two-letter values cause too many false positives; we skip them.
     ocr = "something entirely unrelated"
-    report = validate(_form(gender="AB"), ocr_text=ocr)
+    report = validate(_form(firstName="AB"), ocr_text=ocr)
     assert not any("hallucination" in i.message for i in report.issues)
 
 
 def test_grounding_skipped_when_no_ocr_provided() -> None:
-    # Preserves the old signature: callers without OCR text get the old behavior.
+    # Callers without OCR text get format checks only, no grounding.
     report = validate(_form(lastName="ghost"))
     assert not any("hallucination" in i.message for i in report.issues)

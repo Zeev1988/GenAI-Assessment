@@ -149,6 +149,12 @@ def _get_client() -> AzureOpenAI:
             api_key=settings.azure_openai_key.get_secret_value(),
             api_version=settings.azure_openai_api_version,
             timeout=settings.request_timeout_s,
+            # The SDK retries with exponential back-off on 429 / 503 /
+            # connection errors.  3 attempts strikes a balance between
+            # resilience and not hammering a rate-limited endpoint.
+            # Note: APITimeoutError is intentionally NOT retried by the SDK
+            # (we surface it as a 504 so the client can decide).
+            max_retries=3,
         )
         logger.info(
             "Azure OpenAI client initialised (deployment=%s, api_version=%s)",
@@ -216,10 +222,15 @@ def _call_llm(
             detail="Cannot reach the language model service. Please try again.",
         )
     except APIError as exc:
-        logger.error("[%s] LLM API error (status=%s): %s", request_id, exc.status_code, exc)
+        # status_code lives on APIStatusError (a subclass), not on APIError itself.
+        # message is always present on the base class, but guard with getattr to
+        # be safe across library versions.
+        status = getattr(exc, "status_code", "N/A")
+        message = getattr(exc, "message", str(exc))
+        logger.error("[%s] LLM API error (status=%s): %s", request_id, status, exc)
         raise HTTPException(
             status_code=502,
-            detail=f"Language model error: {exc.message}",
+            detail=f"Language model error: {message}",
         )
 
 

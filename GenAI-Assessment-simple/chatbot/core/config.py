@@ -16,7 +16,30 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # chatbot/core/config.py → chatbot/core → chatbot → project root
 _ROOT = Path(__file__).resolve().parents[2]
 _ENV_FILE = _ROOT / ".env"
-_KNOWLEDGE_BASE_DEFAULT = _ROOT / "tests" / "test_data" / "phase2_data"
+
+
+def _find_knowledge_base() -> Path:
+    """Locate the phase2_data directory by walking up from this file.
+
+    This is robust to the package being imported from any depth in the tree
+    (e.g. after pytest modifies sys.path, or if chatbot/ lives at a different
+    nesting level than expected).  We prefer an existing directory over a
+    hardcoded relative path.
+    """
+    target = Path("tests") / "test_data" / "phase2_data"
+    current = Path(__file__).resolve().parent
+    for _ in range(6):          # search up to 6 levels up
+        candidate = current / target
+        if candidate.exists():
+            return candidate
+        current = current.parent
+        print("2132132")
+    # Nothing found — fall back to parents[2] so the error message at least
+    # shows a meaningful path.
+    return Path(__file__).resolve().parents[2] / target
+
+
+_KNOWLEDGE_BASE_DEFAULT = _find_knowledge_base()
 
 
 class ChatBotSettings(BaseSettings):
