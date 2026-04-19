@@ -1,8 +1,26 @@
+# Virtual environments
 .venv/
+venv/
+
+# Python bytecode / caches
 __pycache__/
 *.pyc
+*.pyo
 .pytest_cache/
 .ruff_cache/
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+
+# Environment secrets
 .env
-# OCR cache — generated on first run, not committed (re-generate with RUN_AZURE_TESTS=1)
+
+# IDE / OS metadata
+.idea/
+.vscode/
+.DS_Store
+
+# OCR cache — generated on first integration run
 tests/fixtures/ocr_cache/*.txt

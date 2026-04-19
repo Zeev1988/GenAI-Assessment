@@ -3,7 +3,7 @@
 Strategy
 --------
 OCR is deterministic for a given PDF (Azure DI always returns the same
-Markdown for the same bytes), so we cache the OCR output on first run.
+output for the same bytes), so we cache the OCR output on first run.
 Subsequent runs skip the Document Intelligence call and go straight to the
 LLM extraction step, making the tests faster and cheaper.
 
@@ -21,7 +21,6 @@ Warm the OCR cache only (no LLM calls):
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from typing import Any
@@ -30,6 +29,11 @@ import pytest
 
 from form_extraction.core.extractor import extract
 from form_extraction.core.ocr import run_ocr
+from form_extraction.core.schemas import (
+    ACCIDENT_LOCATION_LABELS,
+    GENDER_LABELS,
+    HEALTH_FUND_LABELS,
+)
 from form_extraction.core.validate import validate
 
 # ---------------------------------------------------------------------------
@@ -50,20 +54,45 @@ _CACHE_DIR = Path(__file__).parent / "fixtures" / "ocr_cache"
 # Keys map to ExtractedForm field names.  Only the fields we are confident
 # about are listed; the test asserts these exactly and ignores the rest.
 # Fields not listed here are covered by the structural assertions below.
-#
-# To add or update expected values after a new verified run, edit these dicts.
 # ---------------------------------------------------------------------------
 
 _EXPECTED: dict[str, dict[str, Any]] = {
     "283_ex1": {
-        # TODO: fill in after first verified run.
-        # Add entries like: "lastName": "...", "idNumber": "...", etc.
+        "lastName": "טננהוים",
+        "firstName": "יהודה",
+        # 10 digits — non-standard; validator will flag the length.
+        "idNumber": "8775245631",
+        "gender": "זכר",
+        "dateOfBirth": {"day": "02", "month": "02", "year": "1995"},
+        "address": {
+            "street": "הרמבם",
+            "houseNumber": "16",
+            "entrance": "1",
+            "apartment": "12",
+            "city": "אבן יהודה",
+            "postalCode": "312422",
+            "poBox": "",
+        },
+        "jobType": "מלצרות",
+        "dateOfInjury": {"day": "16", "month": "04", "year": "2022"},
+        "timeOfInjury": "19:00",
+        "accidentLocation": "במפעל",
+        "accidentAddress": "הורדים 8, תל אביב",
+        "accidentDescription": "החלקתי בגלל שהרצפה הייתה רטובה ולא היה שום שלט שמזהיר.",
+        "injuredBodyPart": "יד שמאל",
+        "signature": "",
+        "formFillingDate": {"day": "25", "month": "01", "year": "2023"},
+        "formReceiptDateAtClinic": {"day": "02", "month": "02", "year": "1999"},
+        "medicalInstitutionFields": {
+            "healthFundMember": "מאוחדת",
+            "natureOfAccident": "",
+            "medicalDiagnoses": "",
+        },
     },
     "283_ex2": {
         "lastName": "הלוי",
         "firstName": "שלמה",
-        # idNumber resolved via Python normalisation (no Hebrew prefix on ex2):
-        # OCR: "02245612 0" → strip → "022456120" (9 digits, valid)
+        # Digit-box OCR yields "02245612 0" → stripped to "022456120" (9 digits).
         "idNumber": "022456120",
         "gender": "זכר",
         "dateOfBirth": {"day": "14", "month": "10", "year": "1990"},
@@ -82,11 +111,10 @@ _EXPECTED: dict[str, dict[str, Any]] = {
         "accidentAddress": "האופים 17 בני ברק",
         "accidentDescription": "במהלך העבודה נשרף ממגש לוהט.",
         "injuredBodyPart": "הפנים במיוחד הלחי הימנית",
-        "signature": "שלמה הלוי",
+        "signature": "",
         "formFillingDate": {"day": "14", "month": "09", "year": "2006"},
         "formReceiptDateAtClinic": {"day": "03", "month": "07", "year": "2001"},
         "medicalInstitutionFields": {
-            # כללית checkbox was spatially selected by Azure DI
             "healthFundMember": "כללית",
             "natureOfAccident": "",
             "medicalDiagnoses": "",
@@ -95,9 +123,7 @@ _EXPECTED: dict[str, dict[str, Any]] = {
     "283_ex3": {
         "lastName": "יוחננוף",
         "firstName": "רועי",
-        # idNumber resolved via Python normalisation (Hebrew prefix "עי" present):
-        # OCR: "עי 7 6 5 1| 2 5 | 4 3 3 | 0" → strip → "7651254330" → reverse →
-        # "0334521567" (10 digits — validator will flag; no trimming)
+        # 10 digits — non-standard; validator will flag the length.
         "idNumber": "0334521567",
         "gender": "זכר",
         "dateOfBirth": {"day": "03", "month": "03", "year": "1974"},
@@ -117,12 +143,12 @@ _EXPECTED: dict[str, dict[str, Any]] = {
         "accidentAddress": "לוונברג 173 כפר סבא",
         "accidentDescription": "במהלך העבודה הרמתי משקל כבד וכתוצאה מכך הייתי צריך ניתוח קילה",
         "injuredBodyPart": "קילה",
-        "signature": "רועי יוחננוף",
+        "signature": "",
         "formFillingDate": {"day": "20", "month": "05", "year": "1999"},
         "formReceiptDateAtClinic": {"day": "30", "month": "06", "year": "1999"},
         "medicalInstitutionFields": {
-            # Only membership-status checkbox was marked; no fund-name checkbox.
-            # NORMALIZED_HEALTH_FUND emits "" → LLM must copy verbatim.
+            # Only the membership-status checkbox is marked; no fund-name
+            # checkbox → healthFundMember is "".
             "healthFundMember": "",
             "natureOfAccident": "",
             "medicalDiagnoses": "",
@@ -183,14 +209,15 @@ def test_ocr_cache(stem: str) -> None:
     """Ensure OCR cache exists (or create it).  Fast no-op if already cached."""
     ocr_text = _get_ocr(stem)
     assert ocr_text, f"OCR returned empty text for {stem}"
-    # Sanity: OCR output is the spatial extraction header — all fields present.
     assert "=== FORM 283 SPATIAL EXTRACTION ===" in ocr_text, (
         "Spatial extraction header missing"
     )
-    # Every expected field row must be present in the header.
     for key in (
         "formReceiptDateAtClinic:", "formFillingDate:", "dateOfInjury:",
-        "idNumber:", "mobilePhone:", "healthFundMember (resolved):",
+        "idNumber:", "mobilePhone:",
+        "gender (resolved):",
+        "accidentLocation (resolved):",
+        "healthFundMember (resolved):",
         "lastName:", "firstName:", "city:", "jobType:", "accidentDescription:",
     ):
         assert key in ocr_text, f"Spatial header is missing field row: {key!r}"
@@ -220,31 +247,25 @@ def test_extraction_fields(stem: str) -> None:
 
     # Completeness must be reasonable (at least 50% of fields filled)
     assert report.completeness >= 0.5, (
-        f"{stem}: completeness={report.completeness:.0%} — too many empty fields.\n"
-        f"Empty fields: {[i.field for i in report.issues if 'empty' in i.message.lower()]}"
+        f"{stem}: completeness={report.completeness:.0%} — too many empty fields."
     )
 
-    # No hallucination warnings on checkbox or name fields (grounding check)
+    # No hallucination warnings on critical free-text fields (checkbox
+    # enums are no longer grounded; see validate._GROUNDED_FIELDS).
     hallucination_issues = [
         i for i in report.issues
         if "hallucination" in i.message.lower()
-        and i.field in {"lastName", "firstName", "accidentLocation", "gender"}
+        and i.field in {"lastName", "firstName", "jobType"}
     ]
     assert not hallucination_issues, (
         f"{stem}: possible hallucination in critical fields: {hallucination_issues}"
     )
 
-    # Checkbox enum values must be valid (Pydantic already enforces this, but
-    # make the failure message clearer)
-    valid_genders = {"זכר", "נקבה", ""}
-    valid_locations = {
-        "במפעל", "מחוץ למפעל",
-        "ת. דרכים בעבודה",
-        "ת. דרכים בדרך לעבודה/מהעבודה",
-        "תאונה בדרך ללא רכב",
-        "אחר", "",
-    }
-    valid_funds = {"כללית", "מכבי", "מאוחדת", "לאומית", ""}
+    # Checkbox enum values must be valid. Pydantic already enforces this,
+    # but assert here so the failure message is clearer than a schema error.
+    valid_genders = {*GENDER_LABELS, ""}
+    valid_locations = {*ACCIDENT_LOCATION_LABELS, ""}
+    valid_funds = {*HEALTH_FUND_LABELS, ""}
     assert data["gender"] in valid_genders, f"{stem}: invalid gender {data['gender']!r}"
     assert data["accidentLocation"] in valid_locations, (
         f"{stem}: invalid accidentLocation {data['accidentLocation']!r}"
@@ -253,11 +274,13 @@ def test_extraction_fields(stem: str) -> None:
         f"{stem}: invalid healthFundMember {data['medicalInstitutionFields']['healthFundMember']!r}"
     )
 
-    # --- Field-level assertions for cases where expected values are defined --
+    # signature is always empty by design (see schemas.ExtractedForm).
+    assert data["signature"] == "", f"{stem}: signature should always be '' but was {data['signature']!r}"
+
+    # --- Field-level assertions against _EXPECTED ----------------------------
 
     expected = _EXPECTED.get(stem, {})
     if not expected:
-        # No expected values defined yet — skip field assertions
         return
 
     mismatches: list[str] = []
@@ -270,8 +293,8 @@ def test_extraction_fields(stem: str) -> None:
             if actual != exp:
                 mismatches.append(f"  {path}: expected={exp!r}  actual={actual!r}")
 
-    for field, exp_value in expected.items():
-        _assert_field(field, data.get(field), exp_value)
+    for field_name, exp_value in expected.items():
+        _assert_field(field_name, data.get(field_name), exp_value)
 
     if mismatches:
         pytest.fail(
@@ -287,25 +310,29 @@ def test_validation_issues_match_expectations(stem: str) -> None:
     form = extract(ocr_text)
     report = validate(form, ocr_text=ocr_text)
 
-    issue_fields = {i.field for i in report.issues}
     error_fields = {i.field for i in report.issues if i.severity == "error"}
 
+    if stem == "283_ex1":
+        # ex1 has a 10-digit idNumber — must be flagged.
+        assert "idNumber" in error_fields, (
+            "ex1: 10-digit idNumber should trigger a validation error"
+        )
+
     if stem == "283_ex2":
-        # Phones are garbled by OCR (digit-box format confusion)
-        # but no critical field errors expected
+        # ex2 has a valid 9-digit idNumber after digit-box cleanup.
         assert "idNumber" not in error_fields, (
             f"ex2: idNumber should be valid 9 digits but got errors: "
             f"{[i for i in report.issues if i.field == 'idNumber']}"
         )
 
     if stem == "283_ex3":
-        # ID is 10 digits (a real data quality issue on this form) — must be flagged
+        # ex3 also has a 10-digit idNumber — must be flagged.
         assert "idNumber" in error_fields, (
-            "ex3: 10-digit idNumber should trigger a validation error but did not"
+            "ex3: 10-digit idNumber should trigger a validation error"
         )
 
-    # No date errors expected on any example (dates come from digit boxes
-    # which our preprocessing normalises)
+    # No date errors on any example (dates come from digit boxes which our
+    # preprocessing normalises into valid DDMMYYYY windows).
     date_errors = [
         i for i in report.issues
         if i.severity == "error" and "date" in i.field.lower()

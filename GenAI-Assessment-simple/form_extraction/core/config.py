@@ -8,8 +8,8 @@ from pathlib import Path
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Resolve .env relative to the project root (two levels above this file:
-# form_extraction/core/config.py → form_extraction/core → form_extraction → project root)
+# Resolve .env relative to the project root:
+# form_extraction/core/config.py → form_extraction/core → form_extraction → project root
 _ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 
@@ -27,9 +27,7 @@ class Settings(BaseSettings):
     azure_openai_endpoint: str = Field(default="")
     azure_openai_key: SecretStr = Field(default=SecretStr(""))
     azure_openai_api_version: str = Field(default="2024-12-01-preview")
-    # Separate deployments for extraction and judging (matches .env)
-    azure_openai_deployment_extract: str = Field(default="gpt-4o")
-    azure_openai_deployment_judge: str = Field(default="gpt-4o-mini")
+    azure_openai_deployment: str = Field(default="gpt-4o")
 
     # Network timeout (seconds) applied to both Azure clients.
     request_timeout_s: float = Field(default=30.0)

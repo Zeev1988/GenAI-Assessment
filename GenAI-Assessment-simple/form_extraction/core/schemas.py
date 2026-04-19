@@ -2,6 +2,11 @@
 
 Field names are camelCase on purpose — the assignment specifies the JSON keys.
 Every field defaults to "" so missing values are represented as empty strings.
+
+This module is the single source of truth for the three checkbox enums
+(gender, health fund, accident location). Every other module (field_regions,
+extractor prompt, tests) imports the label tuples from here so the four
+layers can never drift apart.
 """
 
 from __future__ import annotations
@@ -10,14 +15,38 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-# Canonical labels for every checkbox group on Form 283.
-# Using Literal forces structured-output to pick one of these exact strings,
-# so RTL reordering in the OCR cannot cause the model to map [X] to the wrong
-# label by position — it must identify the label semantically.
+# ---------------------------------------------------------------------------
+# Checkbox label tuples — single source of truth.
+#
+# The non-empty entries in each tuple correspond one-to-one to the labelled
+# checkboxes actually printed on Form 283. field_regions.CHECKBOXES_PAGE_1
+# uses these exact strings as its dict keys, and the extractor prompt builds
+# its allowed-value list from the same tuples.
+# ---------------------------------------------------------------------------
+
+GENDER_LABELS: tuple[str, ...] = ("זכר", "נקבה")
+
+HEALTH_FUND_LABELS: tuple[str, ...] = ("כללית", "מכבי", "מאוחדת", "לאומית")
+
+ACCIDENT_LOCATION_LABELS: tuple[str, ...] = (
+    "במפעל",
+    "ת. דרכים בעבודה",
+    "ת. דרכים בדרך לעבודה/מהעבודה",
+    "תאונה בדרך ללא רכב",
+    "אחר",
+)
+
+# Literal unions include the empty string so "no checkbox selected" is a
+# valid value for every enum field.
 GenderLabel = Literal["זכר", "נקבה", ""]
 HealthFundLabel = Literal["כללית", "מכבי", "מאוחדת", "לאומית", ""]
 AccidentLocationLabel = Literal[
-    "במפעל", "מחוץ למפעל", "בדרך לעבודה", "בדרך מהעבודה", "ת. דרכים בעבודה", "אחר", ""
+    "במפעל",
+    "ת. דרכים בעבודה",
+    "ת. דרכים בדרך לעבודה/מהעבודה",
+    "תאונה בדרך ללא רכב",
+    "אחר",
+    "",
 ]
 
 
@@ -63,6 +92,9 @@ class ExtractedForm(_Model):
     accidentAddress: str = Field(default="")
     accidentDescription: str = Field(default="")
     injuredBodyPart: str = Field(default="")
+    # signature: retained for schema parity with the assignment spec but
+    # never populated — handwritten signatures aren't reliably OCR'd and the
+    # applicant's printed name is already captured via firstName + lastName.
     signature: str = Field(default="")
     formFillingDate: DatePart = Field(default_factory=DatePart)
     formReceiptDateAtClinic: DatePart = Field(default_factory=DatePart)
@@ -131,6 +163,9 @@ def openai_json_schema() -> dict[str, Any]:
     return schema
 
 
+# Pydantic attaches these annotations that Azure's strict mode doesn't need.
+# NB: description and examples are also dropped — if you start using them you
+# will need to carve them out here.
 _STRIP = frozenset({"default", "title", "examples", "description"})
 
 

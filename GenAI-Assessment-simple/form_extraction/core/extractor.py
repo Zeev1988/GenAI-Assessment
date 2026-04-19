@@ -1,6 +1,6 @@
 """Extract Form 283 fields from OCR text using Azure OpenAI structured outputs.
 
-The OCR stage (`form_extraction.core.ocr`) produces a single
+The OCR stage (:mod:`form_extraction.core.ocr`) produces a single
 ``=== FORM 283 SPATIAL EXTRACTION ===`` document containing every field
 value pre-computed from Azure Document Intelligence polygon coordinates
 (word bounding boxes for text fields, selection-mark polygons for checkboxes).
@@ -20,76 +20,88 @@ from openai import AzureOpenAI
 from pydantic import ValidationError
 
 from form_extraction.core.config import Settings, get_settings
-from form_extraction.core.schemas import ExtractedForm, openai_json_schema
+from form_extraction.core.schemas import (
+    ACCIDENT_LOCATION_LABELS,
+    GENDER_LABELS,
+    HEALTH_FUND_LABELS,
+    ExtractedForm,
+    openai_json_schema,
+)
 
 log = logging.getLogger("form_extraction.extractor")
 
-SYSTEM_PROMPT = """\
+# The prompt's enum lists are built from the schema tuples so the prompt can
+# never disagree with what the strict json_schema response_format will accept.
+_GENDER_LIST = " / ".join(f'"{label}"' for label in GENDER_LABELS)
+_FUND_LIST = " / ".join(f'"{label}"' for label in HEALTH_FUND_LABELS)
+_ACCIDENT_LOCATION_LIST = " / ".join(f'"{label}"' for label in ACCIDENT_LOCATION_LABELS)
+
+SYSTEM_PROMPT = f"""\
 You extract fields from a Bituach Leumi (ביטוח לאומי) Form 283 — Request for \
 Medical Treatment for a Work Injury — Self-Employed.
 
-The OCR input begins with "=== FORM 283 SPATIAL EXTRACTION ===" which contains \
-ALL field values pre-computed from Azure Document Intelligence polygon \
-coordinates.  These values are AUTHORITATIVE and CORRECT.  Your only job is to \
-copy them verbatim into the JSON output.
+The OCR input begins with "=== FORM 283 SPATIAL EXTRACTION ===" and contains \
+every field value pre-computed from Azure Document Intelligence polygon \
+coordinates. Those values are AUTHORITATIVE. Copy them verbatim into the JSON.
 
-Field mapping (spatial header → JSON)
---------------------------------------
-Dates — split DDMMYYYY from the header line into day/month/year:
-  • formReceiptDateAtClinic ← "formReceiptDateAtClinic:" line
-  • formFillingDate         ← "formFillingDate:" line
-  • dateOfInjury            ← "dateOfInjury:" line
-  • dateOfBirth             ← "dateOfBirth:" line
+Field mapping (spatial header line → JSON path)
+-----------------------------------------------
+Dates (split DDMMYYYY into {{day, month, year}}):
+  formReceiptDateAtClinic  →  formReceiptDateAtClinic
+  formFillingDate          →  formFillingDate
+  dateOfInjury             →  dateOfInjury
+  dateOfBirth              →  dateOfBirth
 
-Identifiers:
-  • idNumber      ← "idNumber:" line (copy digit string verbatim)
-  • mobilePhone   ← "mobilePhone:" line
-  • landlinePhone ← "landlinePhone:" line
+Identifiers & phones (copy digit string verbatim):
+  idNumber        →  idNumber
+  mobilePhone     →  mobilePhone
+  landlinePhone   →  landlinePhone
 
-Checkboxes (from the selected-checkbox list):
-  • gender           ← "זכר" or "נקבה"; else ""
-  • accidentLocation ← "במפעל" / "ת. דרכים בעבודה" / \
-    "ת. דרכים בדרך לעבודה/מהעבודה" / "תאונה בדרך ללא רכב" / \
-    "מחוץ למפעל" / "אחר"; else ""
-  • medicalInstitutionFields.healthFundMember ← \
-    "healthFundMember (resolved):" line ("כללית"/"מכבי"/"מאוחדת"/"לאומית" or "")
+Free-text fields (copy verbatim):
+  lastName             →  lastName
+  firstName            →  firstName
+  street               →  address.street
+  poBox                →  address.poBox
+  houseNumber          →  address.houseNumber
+  entrance             →  address.entrance
+  apartment            →  address.apartment
+  city                 →  address.city
+  postalCode           →  address.postalCode
+  jobType              →  jobType
+  timeOfInjury         →  timeOfInjury
+  accidentAddress      →  accidentAddress
+  accidentDescription  →  accidentDescription
+  injuredBodyPart      →  injuredBodyPart
 
-Free-text fields (from "-- Free-text fields --" section of header):
-  • lastName            ← "lastName:" line
-  • firstName           ← "firstName:" line
-  • address.street      ← "street:" line
-  • address.houseNumber ← "houseNumber:" line
-  • address.entrance    ← "entrance:" line
-  • address.apartment   ← "apartment:" line
-  • address.city        ← "city:" line
-  • address.postalCode  ← "postalCode:" line
-  • address.poBox       ← always "" (not on this form)
-  • jobType             ← "jobType:" line
-  • timeOfInjury        ← "timeOfInjury:" line
-  • accidentAddress     ← "accidentAddress:" line
-  • accidentDescription ← "accidentDescription:" line
-  • injuredBodyPart     ← "injuredBodyPart:" line
-  • signature           ← "applicantName:" line (the printed name in the \
-    declaration section)
-  • medicalInstitutionFields.natureOfAccident  ← always "" (filled by clinic)
-  • medicalInstitutionFields.medicalDiagnoses  ← always "" (filled by clinic)
+Resolved checkbox lines (one pre-resolved value per enum field):
+  "gender (resolved):"            →  gender (one of {_GENDER_LIST}, else "")
+  "accidentLocation (resolved):"  →  accidentLocation \
+(one of {_ACCIDENT_LOCATION_LIST}, else "")
+  "healthFundMember (resolved):"  →  medicalInstitutionFields.healthFundMember \
+(one of {_FUND_LIST}, else "")
 
 Rules
 -----
-1. Copy every spatial-header value VERBATIM into the JSON.
-2. "(not found)" or "(none — …)" in the header → "" in JSON \
-   (empty string for all date sub-parts too).
+1. Copy every spatial-header value verbatim into its mapped JSON path.
+2. "(not found)" or "(none — …)" in the header → "" in the JSON (every date \
+   sub-part is also "").
 3. DDMMYYYY dates: day = chars 1-2, month = chars 3-4, year = chars 5-8.
-4. idNumber: copy verbatim including leading zeros, even if digit count ≠ 9. \
-   A non-standard length is a data-quality signal — do NOT trim or pad.
-5. Preserve original language (Hebrew stays Hebrew, English stays English).
-6. If a field is genuinely blank (empty string in header), output "".  \
-   Never return null, "N/A", "-", or placeholder text.
-7. Output JSON only. No prose, no markdown fences.
+4. idNumber: copy verbatim including leading zeros, even if the digit count \
+   is not 9 — a non-standard length is a data-quality signal the validator \
+   will flag; do not trim or pad.
+5. Schema fields with no corresponding header line → "". This covers \
+   signature, medicalInstitutionFields.natureOfAccident, and \
+   medicalInstitutionFields.medicalDiagnoses. Never invent values for them \
+   from adjacent sections.
+6. Output JSON only — no prose, no markdown fences.
 """
 
 # ---------------------------------------------------------------------------
 # Few-shot examples
+#
+# Both examples are constructed to match the exact text that
+# ocr._render_spatial_header emits. Keep them in sync with that function
+# whenever its wording changes.
 # ---------------------------------------------------------------------------
 
 FEW_SHOT_OCR = """\
@@ -113,16 +125,20 @@ idNumber:                011111111
 mobilePhone:             0501234567
 landlinePhone:           (not found)
 
--- Selected checkboxes (from Azure DI selection marks + directional label match) --
+-- Selected checkboxes (from Azure DI selection marks + coordinate region lookup) --
   [SELECTED] at (5.90, 3.05)  →  label: נקבה
   [SELECTED] at (5.10, 6.10)  →  label: במפעל
+  [SELECTED] at (5.67, 9.89)  →  label: מכבי
 
-healthFundMember (resolved): (none — no fund checkbox selected)
+gender (resolved):           נקבה
+accidentLocation (resolved): במפעל
+healthFundMember (resolved): מכבי
 
 -- Free-text fields (extracted from fixed coordinate regions) --
 lastName:            כהן
 firstName:           דנה
 street:              הרצל
+poBox:
 houseNumber:         10
 entrance:
 apartment:
@@ -133,7 +149,6 @@ timeOfInjury:        09:30
 accidentAddress:     דרך מנחם בגין 12, תל אביב
 accidentDescription: החלקתי על רצפה רטובה
 injuredBodyPart:     גב תחתון
-applicantName:       דנה כהן
 """
 
 FEW_SHOT_JSON = {
@@ -160,18 +175,19 @@ FEW_SHOT_JSON = {
     "accidentAddress": "דרך מנחם בגין 12, תל אביב",
     "accidentDescription": "החלקתי על רצפה רטובה",
     "injuredBodyPart": "גב תחתון",
-    "signature": "דנה כהן",
+    "signature": "",
     "formFillingDate": {"day": "04", "month": "04", "year": "2024"},
     "formReceiptDateAtClinic": {"day": "", "month": "", "year": ""},
     "medicalInstitutionFields": {
-        "healthFundMember": "",
+        "healthFundMember": "מכבי",
         "natureOfAccident": "",
         "medicalDiagnoses": "",
     },
 }
 
-# Edge-case example: missing dates, blank address, no health-fund checkbox,
-# membership-status mark that does NOT set healthFundMember.
+# Edge-case example: missing dates, PO Box instead of street name, and only
+# the membership-status checkbox is marked in Section 5 (must NOT populate
+# healthFundMember).
 FEW_SHOT_NEG_OCR = """\
 === FORM 283 SPATIAL EXTRACTION ===
 
@@ -193,16 +209,19 @@ idNumber:                0222222222
 mobilePhone:             0529876543
 landlinePhone:           (not found)
 
--- Selected checkboxes (from Azure DI selection marks + directional label match) --
+-- Selected checkboxes (from Azure DI selection marks + coordinate region lookup) --
   [SELECTED] at (5.90, 3.05)  →  label: זכר
   [SELECTED] at (4.80, 7.90)  →  label: הנפגע חבר בקופת חולים
 
+gender (resolved):           זכר
+accidentLocation (resolved): (none — no accident-location checkbox selected)
 healthFundMember (resolved): (none — no fund checkbox selected)
 
 -- Free-text fields (extracted from fixed coordinate regions) --
 lastName:            לוי
 firstName:           רועי
 street:              (not found)
+poBox:               5678
 houseNumber:         (not found)
 entrance:
 apartment:
@@ -213,7 +232,6 @@ timeOfInjury:        14:20
 accidentAddress:
 accidentDescription: נפלתי מסולם בזמן עבודה
 injuredBodyPart:     כתף ימין
-applicantName:
 """
 
 FEW_SHOT_NEG_JSON = {
@@ -224,7 +242,7 @@ FEW_SHOT_NEG_JSON = {
     "dateOfBirth": {"day": "15", "month": "07", "year": "1985"},
     "address": {
         "street": "", "houseNumber": "", "entrance": "", "apartment": "",
-        "city": "", "postalCode": "", "poBox": "",
+        "city": "", "postalCode": "", "poBox": "5678",
     },
     "landlinePhone": "",
     "mobilePhone": "0529876543",
@@ -265,30 +283,27 @@ def extract(ocr_text: str, settings: Settings | None = None) -> ExtractedForm:
 
     messages: list[dict[str, str]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        # Positive example: filled form, straightforward extraction.
-        {"role": "user", "content": f"OCR content:\n----- BEGIN -----\n{FEW_SHOT_OCR}\n----- END -----"},
+        # Positive example: filled form, fund resolved, straightforward copy.
+        {"role": "user", "content": f"OCR content:\n{FEW_SHOT_OCR}"},
         {"role": "assistant", "content": json.dumps(FEW_SHOT_JSON, ensure_ascii=False)},
-        # Negative example: missing dates, no fund resolved, blank address &
-        # signature.  Demonstrates "(not found)" / "(none — …)" → "" in JSON,
-        # and that a membership-status checkbox does not set healthFundMember.
-        {"role": "user", "content": f"OCR content:\n----- BEGIN -----\n{FEW_SHOT_NEG_OCR}\n----- END -----"},
+        # Negative example: missing dates, blank address, membership-status
+        # checkbox that must NOT populate healthFundMember.
+        {"role": "user", "content": f"OCR content:\n{FEW_SHOT_NEG_OCR}"},
         {"role": "assistant", "content": json.dumps(FEW_SHOT_NEG_JSON, ensure_ascii=False)},
         # Real request.
-        {"role": "user", "content": f"OCR content:\n----- BEGIN -----\n{ocr_text}\n----- END -----"},
+        {"role": "user", "content": f"OCR content:\n{ocr_text}"},
     ]
 
     log.info("extract.start ocr_chars=%d", len(ocr_text))
     t0 = time.perf_counter()
-    payload = _call(client, s.azure_openai_deployment_extract, messages, schema)
-    log.info("extract.llm_response %s", json.dumps(payload, ensure_ascii=False))
+    payload = _call(client, s.azure_openai_deployment, messages, schema)
+
     try:
         form = ExtractedForm.model_validate(payload)
-        log.info("extract.done elapsed_ms=%d", int((time.perf_counter() - t0) * 1000))
-        return form
     except ValidationError as exc:
-        # One corrective re-ask on the off-chance strict mode still produces
-        # a payload Pydantic rejects (extra field trimmed post-JSON, etc.).
-        log.warning("extract.retry reason=%s", exc.error_count())
+        # One corrective re-ask on the rare case strict mode still produces
+        # a payload Pydantic rejects (e.g., an enum value that slipped through).
+        log.warning("extract.retry errors=%d", exc.error_count())
         messages.append({"role": "assistant", "content": json.dumps(payload, ensure_ascii=False)})
         messages.append(
             {
@@ -302,10 +317,13 @@ def extract(ocr_text: str, settings: Settings | None = None) -> ExtractedForm:
                 ),
             }
         )
-        payload = _call(client, s.azure_openai_deployment_extract, messages, schema)
+        payload = _call(client, s.azure_openai_deployment, messages, schema)
         form = ExtractedForm.model_validate(payload)
         log.info("extract.done retried=1 elapsed_ms=%d", int((time.perf_counter() - t0) * 1000))
         return form
+
+    log.info("extract.done elapsed_ms=%d", int((time.perf_counter() - t0) * 1000))
+    return form
 
 
 def _call(

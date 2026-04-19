@@ -5,6 +5,9 @@ Nothing in this package imports from `form_extraction.ui`. Keep it that way.
 
 from form_extraction.core.pipeline import PipelineResult, run
 from form_extraction.core.schemas import (
+    ACCIDENT_LOCATION_LABELS,
+    GENDER_LABELS,
+    HEALTH_FUND_LABELS,
     HEBREW_KEY_MAP,
     ExtractedForm,
     openai_json_schema,
@@ -13,7 +16,10 @@ from form_extraction.core.schemas import (
 from form_extraction.core.validate import Issue, ValidationReport, validate
 
 __all__ = [
+    "ACCIDENT_LOCATION_LABELS",
     "ExtractedForm",
+    "GENDER_LABELS",
+    "HEALTH_FUND_LABELS",
     "HEBREW_KEY_MAP",
     "Issue",
     "PipelineResult",

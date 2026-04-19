@@ -1,12 +1,13 @@
 """Simple accuracy + completeness validation for an ExtractedForm.
 
-Accuracy here means "the values the LLM returned are in the format we expect
-for their field" — ID is 9 digits, phones start with 0, times are HH:MM,
-dates are real calendar dates. We deliberately stop there: any check that
-tries to reason about whether a field is semantically right (e.g. which
-checkbox the form marked) belongs in the LLM prompt, not in a rules engine.
+Accuracy here means "the values the LLM returned are in the format we
+expect for their field" — ID is 9 digits, phones start with 0, times are
+HH:MM, dates are real calendar dates. We deliberately stop there: any
+check that tries to reason about whether a field is semantically right
+(e.g. which checkbox the form marked) belongs in the LLM prompt, not in
+a rules engine.
 
-Completeness is a simple filled/total leaf count.
+Completeness is a simple filled / total leaf count.
 """
 
 from __future__ import annotations
@@ -46,38 +47,33 @@ class ValidationReport:
 
 _ID_RE = re.compile(r"^\d{9}$")
 _MOBILE_RE = re.compile(r"^05\d{8}$")
-_LANDLINE_RE = re.compile(r"^0[2-489]\d{7}$")
+# Israeli landlines: 9 digits, area codes 02/03/04/08/09.
+_LANDLINE_RE = re.compile(r"^0[234689]\d{7}$")
 _TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
 # Punctuation/whitespace we strip before grounding comparison. The OCR
-# frequently spaces Hebrew text differently than the extracted value and
-# sprinkles formatting characters the LLM collapses. We keep only letters
-# and digits (any script), which is what actually carries meaning.
+# frequently spaces Hebrew text differently than the extracted value, so we
+# keep only letters and digits — the characters that actually carry meaning.
 _GROUND_STRIP_RE = re.compile(r"[^\w]", flags=re.UNICODE)
 
-# Free-text fields worth grounding. We exclude structured/transformed fields
-# (IDs, phones, dates, times) because their format validators already catch
-# bogus values and because the model legitimately rewrites them (e.g. strips
-# dashes from phones) which would cause spurious grounding failures.
+# Free-text fields worth grounding. We exclude:
+#   * structured/transformed fields (IDs, phones, dates, times) — their format
+#     validators already catch bogus values, and the model legitimately
+#     re-formats them (e.g. strips dashes).
+#   * enum fields (gender, accidentLocation, healthFundMember) — these come
+#     from checkbox resolution, not from the OCR body; grounding would
+#     produce false-positive hallucination warnings.
 _GROUNDED_FIELDS: tuple[str, ...] = (
     "lastName",
     "firstName",
-    "gender",
     "jobType",
-    "accidentLocation",
     "accidentAddress",
     "accidentDescription",
     "injuredBodyPart",
-    "signature",
 )
 _GROUNDED_ADDRESS_FIELDS: tuple[str, ...] = ("street", "city")
-_GROUNDED_MEDICAL_FIELDS: tuple[str, ...] = (
-    "healthFundMember",
-    "natureOfAccident",
-    "medicalDiagnoses",
-)
 # Minimum length before we bother grounding. One- and two-character values
-# produce too many false positives (e.g. "X" matches any uppercase X in OCR).
+# produce too many false positives (e.g. "X" matches any X in OCR).
 _MIN_GROUND_LEN = 3
 
 
@@ -112,9 +108,9 @@ def _check_grounding(form: ExtractedForm, ocr_text: str) -> list[Issue]:
     """Flag free-text values that don't appear as substrings of the OCR.
 
     This is an observational guardrail against LLM hallucination: any value
-    that isn't physically on the page is suspicious. We normalize aggressively
-    (strip punctuation / whitespace, casefold) to avoid false positives caused
-    by the LLM trimming or re-spacing a legitimately-present value.
+    that isn't physically on the page is suspicious. We normalize
+    aggressively (strip punctuation / whitespace, casefold) to avoid false
+    positives caused by the LLM trimming or re-spacing a legitimate value.
 
     Not corrective — we never blank fields; we only surface warnings so the
     human reviewer can check the OCR tab.
@@ -142,11 +138,6 @@ def _check_grounding(form: ExtractedForm, ocr_text: str) -> list[Issue]:
         check(f, data.get(f, ""))
     for f in _GROUNDED_ADDRESS_FIELDS:
         check(f"address.{f}", data.get("address", {}).get(f, ""))
-    for f in _GROUNDED_MEDICAL_FIELDS:
-        check(
-            f"medicalInstitutionFields.{f}",
-            data.get("medicalInstitutionFields", {}).get(f, ""),
-        )
     return issues
 
 
