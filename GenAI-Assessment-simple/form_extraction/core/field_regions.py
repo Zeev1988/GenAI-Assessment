@@ -70,104 +70,81 @@ from __future__ import annotations
 PAGE_1: dict[str, tuple[float, float, float, float]] = {
 
     # ------------------------------------------------------------------
-    # Form header — two date clusters at the top-left of the page
-    # Digit boxes sit between the label row (y≈1.00) and the
-    # יום/חודש/שנה sub-label row (y≈1.43 / 1.48).
+    # Coordinates derived from user-measured PDF annotation (Book2.xlsx).
+    # Original values are in PDF points; converted to inches at 72 pt/inch.
+    # Fields not present in the spreadsheet retain manually calibrated values.
     # ------------------------------------------------------------------
 
-    # תאריך מילוי הטופס  (form filling date — written by clinic)
-    # sub-labels span x≈0.97–2.32, so boxes are just above them.
-    # y1 extended to 1.65 to capture digit content that sits at the lower
-    # edge of the pre-printed boxes (which overlap with sub-label row y≈1.43–1.55).
-    "filling_date":    (0.75, 0.95, 2.50, 1.65),
+    # Form header ──────────────────────────────────────────────────────
+    "filling_date":    (0.80, 0.63, 2.59, 1.70),
+    "receipt_date":    (2.88, 0.64, 4.66, 1.72),
 
-    # תאריך קבלת הטופס בקופה  (date clinic received the form)
-    # sub-labels span x≈3.03–4.36
-    # y1 extended to 1.70 for the same reason as filling_date above.
-    "receipt_date":    (2.85, 1.00, 4.55, 1.70),
+    # Section 1 — תאריך הפגיעה ─────────────────────────────────────────
+    "injury_date":     (3.31, 2.25, 5.06, 2.66),
 
-    # ------------------------------------------------------------------
-    # Section 1 — תאריך הפגיעה  (date of injury)
-    # Digit boxes between section header (y≈2.38) and sub-labels (y≈2.56)
-    # ------------------------------------------------------------------
-    "injury_date":     (1.00, 2.20, 5.20, 2.60),
+    # Section 2 — פרטי התובע ──────────────────────────────────────────
+    "last_name":       (5.67, 3.02, 7.71, 3.57),
 
-    # ------------------------------------------------------------------
-    # Section 2 — פרטי התובע  (claimant personal details)
-    # ------------------------------------------------------------------
+    # first_name: "ס״ב / עי" checksum prefix overlaps this region;
+    # filtered by content in ocr.py (_CHECKSUM_TOKENS), not by coordinate.
+    "first_name":      (3.46, 3.03, 5.59, 3.56),
 
-    # שם משפחה  (last name) — right column, text below the label
-    "last_name":       (5.50, 3.15, 7.75, 3.60),
-
-    # שם פרטי  (first name) — middle column, text below the label
-    "first_name":      (3.40, 3.15, 5.40, 3.60),
-
-    # ת.ז.  (ID) — digit boxes extend LEFT from the ת.ז. label (x≈3.14)
-    # ס״ב checksum label sits at x≈2.88–3.07.  x1 extended to 3.55 to reach
-    # any 10th box (e.g. ex3 has a 10-digit ID whose last box sits near x≈3.35).
-    # The ת.ז. and ס״ב label text captured in this wider region contains no
-    # digits, so _extract_digit_field silently strips it.
-    "id_number":       (0.30, 3.00, 3.55, 3.55),
+    # id_number: digit extraction strips any non-digit label text.
+    "id_number":       (0.68, 3.27, 3.41, 3.56),
 
     # gender — handled by _extract_selected_checkboxes, not here
 
-    # תאריך לידה  (date of birth)
-    # Label at y≈3.62–3.78; sub-labels at y≈4.09–4.22; boxes between them
-    "birth_date":      (2.20, 3.78, 4.95, 4.10),
+    "birth_date":      (2.20, 3.76, 4.07, 4.08),
 
-    # ------------------------------------------------------------------
-    # כתובת  (address) — single row with 6 labelled columns
-    # Column label row at y≈4.47–4.60; input row just below: y≈4.62–4.90
-    # Column boundaries inferred from label centre-x values
-    # ------------------------------------------------------------------
-    "street":          (6.10, 4.62, 7.75, 4.90),   # רחוב / תא דואר  cx≈6.39
-    "house_number":    (4.90, 4.62, 6.10, 4.90),   # מס׳ בית          cx≈5.21
-    "entrance":        (4.25, 4.62, 4.90, 4.90),   # כניסה            cx≈4.51
-    "apartment":       (3.55, 4.62, 4.25, 4.90),   # דירה             cx≈3.81
-    "city":            (1.80, 4.62, 3.55, 4.90),   # יישוב            cx≈2.42
-    "postal_code":     (0.30, 4.62, 1.80, 4.90),   # מיקוד            cx≈1.02
+    # Address row ──────────────────────────────────────────────────────
+    # street: x0 kept at 4.80 (wider than the labelled column x≈5.66)
+    # because multi-word street names often spill left into the house-number
+    # column; pure-digit tokens are stripped in ocr.py.
+    "street":          (4.80, 4.48, 7.73, 4.90),
+    # house_number: _extract_digit_field strips any spillover street text.
+    "house_number":    (4.85, 4.46, 5.58, 4.89),
+    "entrance":        (4.23, 4.47, 4.81, 4.90),
+    "apartment":       (3.45, 4.47, 4.18, 4.89),
+    # city: apartment number is in the next column (x≥3.45) so won't bleed
+    # in; digit filter in ocr.py kept as an extra safety net.
+    "city":            (1.46, 4.46, 3.41, 4.89),
+    "postal_code":     (0.66, 4.46, 1.38, 4.87),
 
-    # ------------------------------------------------------------------
-    # Phone fields
-    # Labels at y≈4.94–5.10; digit boxes in the row below: y≈5.10–5.30
-    # Mobile ("נייד") is the LEFT cluster; landline ("קווי") is RIGHT.
-    # "ח" area-code separators at y≈5.14–5.22 are INSIDE these regions.
-    # ------------------------------------------------------------------
-    "mobile_phone":    (0.30, 5.10, 3.55, 5.30),   # left of "טלפון נייד" label
-    "landline_phone":  (4.60, 5.10, 7.15, 5.30),   # left of "טלפון קווי" label
+    # Phone fields ─────────────────────────────────────────────────────
+    "mobile_phone":    (0.66, 4.95, 4.17, 5.35),
+    "landline_phone":  (4.23, 4.95, 7.74, 5.35),
 
-    # ------------------------------------------------------------------
-    # Section 3 — פרטי התאונה  (accident details)
-    # ------------------------------------------------------------------
+    # Section 3 — פרטי התאונה ─────────────────────────────────────────
+    # job_type: "כאשר עבדתי ב" label starts at x≈3.55; x1=3.52 keeps it out.
+    # "סוג העבודה" label centre is at y≈6.26; y1=6.20 keeps it out.
+    "job_type":        (0.68, 5.76, 3.52, 6.20),
 
-    # סוג העבודה  (job type) — free text to the LEFT of "כאשר עבדתי ב"
-    # "כאשר" starts at x≈4.05; job text fills x≈0.30–3.50, same line y≈6.03
-    "job_type":        (0.30, 6.03, 3.50, 6.32),
-
-    # שעת הפגיעה  (time of injury — HH:MM)
-    # Between "כאשר עבדתי ב" (ends x≈4.37) and "בשעה" (starts x≈5.43)
-    "time_of_injury":  (4.40, 6.03, 5.40, 6.22),
+    # time_of_injury: between "כאשר עבדתי ב" (ends x≈4.37) and "בשעה" (x≈5.43)
+    "time_of_injury":  (4.39, 5.91, 5.39, 6.15),
 
     # מקום התאונה checkboxes — handled by _extract_selected_checkboxes
 
-    # כתובת מקום התאונה  (accident address)
-    # Input line is just below the label row (y≈6.60–6.74)
-    "accident_address": (0.30, 6.74, 6.55, 7.05),
+    # accident_address: x1 extended to 7.77 (user-measured) — critical fix.
+    # Hebrew text is written RTL so the first word ('לוונברג') sits at the
+    # highest x; old x1=6.55 cut it off entirely.
+    "accident_address": (0.69, 6.59, 7.77, 6.98),
 
-    # נסיבות הפגיעה / תיאור התאונה  (accident description — may span 2 lines)
-    # Just below "נסיבות" label (y≈7.12–7.27)
-    "accident_description": (0.30, 7.27, 6.05, 7.65),
+    # accident_description: text sits ABOVE the "נסיבות הפגיעה" label
+    # (y≈7.12–7.27); region kept at y=[6.90, 7.27] which is confirmed
+    # working. x1=7.75 per user measurement.
+    "accident_description": (0.30, 6.90, 7.75, 7.27),
 
-    # האיבר שנפגע  (injured body part)
-    # Just below "האיבר שנפגע" label (y≈7.58–7.71)
-    "injured_body_part": (0.30, 7.71, 6.90, 7.95),
+    # injured_body_part: user-measured region.
+    "injured_body_part": (0.68, 7.58, 7.75, 7.88),
 
     # ------------------------------------------------------------------
     # Section 4 — הצהרה  (declaration)
     # ------------------------------------------------------------------
 
     # שם המבקש  (applicant printed name) — to the LEFT of label (x≈6.96)
-    "applicant_name":  (3.20, 9.20, 6.90, 9.60),
+    # y0 raised 9.20 → 8.85, y1 raised 9.60 → 9.20: the printed name appears
+    # ABOVE the "שם המבקש" label (y≈9.13–9.28); old region was below the label.
+    "applicant_name":  (3.20, 8.85, 6.90, 9.20),
 
     # חתימה  (signature) — to the LEFT of the "חתימה" label (x≈2.66)
     "signature":       (0.30, 9.09, 2.50, 9.35),
@@ -183,4 +160,41 @@ PAGE_1: dict[str, tuple[float, float, float, float]] = {
     # Input area is below the label, before the page footer (y≈10.75)
     "nature_of_accident": (0.30, 10.29, 5.35, 10.50),   # same row as label, left side
     "medical_diagnoses":  (0.30, 10.50, 7.75, 10.80),   # below label row
+}
+
+# ---------------------------------------------------------------------------
+# Checkbox regions for every tickable box on page 1.
+#
+# Each entry maps a known label to the bounding box of its printed checkbox
+# square (x0, y0, x1, y1) in inches.  _extract_selected_checkboxes checks
+# whether an Azure DI selection-mark centre falls inside any box and returns
+# the corresponding label directly — no word-proximity heuristic required.
+#
+# Source: user-measured PDF coordinates converted at 72 pt/inch.
+# Gender boxes are estimated from observed Azure DI mark positions because
+# they were not included in the measurement spreadsheet.
+# ---------------------------------------------------------------------------
+
+CHECKBOXES_PAGE_1: dict[str, tuple[float, float, float, float]] = {
+
+    # Section 2 — gender (estimated; no spreadsheet measurement available)
+    "זכר":   (6.90, 3.85, 7.25, 4.12),   # mark observed at (7.08, 3.98)
+    "נקבה":  (6.40, 3.85, 6.75, 4.12),   # estimated; no test case available
+
+    # Section 3 — accident location
+    "במפעל":                          (6.667, 6.351, 6.907, 6.515),
+    "ת. דרכים בעבודה":               (6.023, 6.351, 6.275, 6.540),
+    "ת. דרכים בדרך לעבודה/מהעבודה": (4.886, 6.351, 5.126, 6.528),
+    "תאונה בדרך ללא רכב":            (2.917, 6.364, 3.157, 6.528),
+    "אחר":                            (1.566, 6.351, 1.806, 6.528),
+
+    # Section 5 — health-fund membership status
+    "הנפגע חבר בקופת חולים":       (7.247, 9.811, 7.487, 9.962),
+    "הנפגע אינו חבר בקופת חולים":  (7.273, 10.025, 7.475, 10.227),
+
+    # Section 5 — health-fund name
+    "כללית":   (5.669, 9.811, 5.884, 9.975),
+    "מאוחדת":  (5.025, 9.785, 5.265, 9.962),
+    "מכבי":    (4.306, 9.785, 4.533, 9.962),
+    "לאומית":  (3.725, 9.811, 3.965, 9.975),
 }

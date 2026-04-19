@@ -1,27 +1,13 @@
 """Extract Form 283 fields from OCR text using Azure OpenAI structured outputs.
 
-The OCR stage (`form_extraction.core.ocr`) produces a two-part document:
+The OCR stage (`form_extraction.core.ocr`) produces a single
+``=== FORM 283 SPATIAL EXTRACTION ===`` document containing every field
+value pre-computed from Azure Document Intelligence polygon coordinates
+(word bounding boxes for text fields, selection-mark polygons for checkboxes).
 
-  1. ``=== FORM 283 SPATIAL EXTRACTION ===`` — authoritative key/value pairs
-     for every dated / numbered / checkbox field, derived from Azure Document
-     Intelligence's Markdown stream (label-anchored regex for dates / ID /
-     phones) and its polygon-based selection marks (for checkboxes).  Each
-     line is shaped like:
-
-         formReceiptDateAtClinic: 02021999  (day=02  month=02  year=1999)   [label 'תאריך קבלת הטופס בקופה']
-
-     and the checkbox section lists one ``[SELECTED]`` line per selected mark
-     with the resolved label and a single ``healthFundMember (resolved): …``
-     line at the bottom.
-
-  2. ``=== FORM BODY (markdown OCR) ===`` — the raw Markdown OCR, useful only
-     for free-text fields (names, address parts, job type, accident
-     description, injured body part, signature, clinic free-text).
-
-The LLM's job is therefore very narrow: copy the spatial-header values
-verbatim into the schema, and read the Markdown body only for the
-descriptive free-text fields.  No RTL reasoning, no date parsing, no
-checkbox inference.
+The LLM's job is minimal: copy every value in the spatial header verbatim
+into the JSON schema, split DDMMYYYY dates into day/month/year parts, and
+map checkbox labels to their enum values.
 """
 
 from __future__ import annotations
@@ -42,80 +28,68 @@ SYSTEM_PROMPT = """\
 You extract fields from a Bituach Leumi (ביטוח לאומי) Form 283 — Request for \
 Medical Treatment for a Work Injury — Self-Employed.
 
-The OCR input has two parts:
+The OCR input begins with "=== FORM 283 SPATIAL EXTRACTION ===" which contains \
+ALL field values pre-computed from Azure Document Intelligence polygon \
+coordinates.  These values are AUTHORITATIVE and CORRECT.  Your only job is to \
+copy them verbatim into the JSON output.
 
-A. "=== FORM 283 SPATIAL EXTRACTION ===" — authoritative key/value pairs \
-derived from the page's polygon coordinates.  These are PRE-COMPUTED and \
-CORRECT.  For every field listed in this header, COPY THE VALUE VERBATIM \
-into the JSON output.  Never re-derive these values from the Markdown body.
+Field mapping (spatial header → JSON)
+--------------------------------------
+Dates — split DDMMYYYY from the header line into day/month/year:
+  • formReceiptDateAtClinic ← "formReceiptDateAtClinic:" line
+  • formFillingDate         ← "formFillingDate:" line
+  • dateOfInjury            ← "dateOfInjury:" line
+  • dateOfBirth             ← "dateOfBirth:" line
 
-B. "=== FORM BODY (markdown OCR) ===" — the raw Markdown OCR. Use this \
-ONLY for free-text / descriptive fields that are NOT listed in the spatial \
-header (names, address parts, job type, accident address, accident \
-description, injured body part, signature, natureOfAccident, \
-medicalDiagnoses).
+Identifiers:
+  • idNumber      ← "idNumber:" line (copy digit string verbatim)
+  • mobilePhone   ← "mobilePhone:" line
+  • landlinePhone ← "landlinePhone:" line
 
-Field source map
-----------------
-From the spatial header (copy exactly):
-  • formReceiptDateAtClinic ← "formReceiptDateAtClinic:" line (DDMMYYYY → \
-    day/month/year parts).
-  • formFillingDate         ← "formFillingDate:" line.
-  • dateOfInjury            ← "dateOfInjury:" line.
-  • dateOfBirth             ← "dateOfBirth:" line.
-  • idNumber                ← "idNumber:" line (string of digits, as given).
-  • mobilePhone             ← "mobilePhone:" line.
-  • landlinePhone           ← "landlinePhone:" line.
-  • gender                  ← look in the selected-checkbox list for \
-    "זכר" or "נקבה"; else "".
-  • accidentLocation        ← look in the selected-checkbox list for one of \
-    "במפעל" / "מחוץ למפעל" / "בדרך לעבודה" / "בדרך מהעבודה" / \
-    "ת. דרכים בעבודה" / "אחר"; else "".
-  • medicalInstitutionFields.healthFundMember ← the \
-    "healthFundMember (resolved):" line ("כללית" / "מכבי" / "מאוחדת" / \
-    "לאומית" or "" if none).
+Checkboxes (from the selected-checkbox list):
+  • gender           ← "זכר" or "נקבה"; else ""
+  • accidentLocation ← "במפעל" / "ת. דרכים בעבודה" / \
+    "ת. דרכים בדרך לעבודה/מהעבודה" / "תאונה בדרך ללא רכב" / \
+    "מחוץ למפעל" / "אחר"; else ""
+  • medicalInstitutionFields.healthFundMember ← \
+    "healthFundMember (resolved):" line ("כללית"/"מכבי"/"מאוחדת"/"לאומית" or "")
 
-From the Markdown body:
-  • lastName, firstName — from SECTION 2 ("פרטי התובע").
-  • address.{street, houseNumber, entrance, apartment, city, postalCode, \
-    poBox} — from the address table in SECTION 2.
-  • jobType — from SECTION 3, before "סוג העבודה" (or after "כאשר עבדתי ב").
-  • timeOfInjury — from SECTION 3, the token before "בשעה" (HH:MM format).
-  • accidentAddress — from SECTION 3, the text after "כתובת מקום התאונה".
-  • accidentDescription — from SECTION 3, the free-text sentence for \
-    "נסיבות הפגיעה / תאור התאונה".
-  • injuredBodyPart — from SECTION 3, after "האיבר שנפגע".
-  • signature — from SECTION 4, the handwritten name line (appears above or \
-    below "שם המבקש" / "חתימה"). If the page shows no handwritten name, "".
-  • medicalInstitutionFields.natureOfAccident — from SECTION 5, text after \
-    "מהות התאונה (אבחנות רפואיות):".
-  • medicalInstitutionFields.medicalDiagnoses — from SECTION 5, any \
-    additional diagnostic free-text.  If nothing is written, "".
+Free-text fields (from "-- Free-text fields --" section of header):
+  • lastName            ← "lastName:" line
+  • firstName           ← "firstName:" line
+  • address.street      ← "street:" line
+  • address.houseNumber ← "houseNumber:" line
+  • address.entrance    ← "entrance:" line
+  • address.apartment   ← "apartment:" line
+  • address.city        ← "city:" line
+  • address.postalCode  ← "postalCode:" line
+  • address.poBox       ← always "" (not on this form)
+  • jobType             ← "jobType:" line
+  • timeOfInjury        ← "timeOfInjury:" line
+  • accidentAddress     ← "accidentAddress:" line
+  • accidentDescription ← "accidentDescription:" line
+  • injuredBodyPart     ← "injuredBodyPart:" line
+  • signature           ← "applicantName:" line (the printed name in the \
+    declaration section)
+  • medicalInstitutionFields.natureOfAccident  ← always "" (filled by clinic)
+  • medicalInstitutionFields.medicalDiagnoses  ← always "" (filled by clinic)
 
 Rules
 -----
-1. Copy every value in the spatial header VERBATIM.  If the header shows \
-   "(not found)" or "(none — …)", use "" for that field (all its sub-parts \
-   for dates).
-2. Dates in the spatial header are always DDMMYYYY: day = chars 1-2, month \
-   = chars 3-4, year = chars 5-8.  Split them exactly that way.
-3. Never infer a checkbox value from ☐/☒/:selected: symbols in the Markdown \
-   body — those are unreliable under RTL.  Use ONLY the selected-checkbox \
-   list and the "healthFundMember (resolved)" line from the spatial header.
-4. The spatial header is authoritative for idNumber.  Copy its digits \
-   verbatim, INCLUDING any leading zeros and EVEN IF the digit count is \
-   not 9.  A 10-digit ID (or any non-standard length) is a legitimate \
-   data-quality signal that a downstream validator will flag — do NOT \
-   truncate, pad, re-order, or re-derive the value from the Markdown body.
-5. For free-text fields that are genuinely absent from the Markdown body, \
-   return "".  Never return null, "N/A", "-", or placeholder text.
-6. Preserve the original language of every value — Hebrew stays Hebrew, \
-   English stays English.
+1. Copy every spatial-header value VERBATIM into the JSON.
+2. "(not found)" or "(none — …)" in the header → "" in JSON \
+   (empty string for all date sub-parts too).
+3. DDMMYYYY dates: day = chars 1-2, month = chars 3-4, year = chars 5-8.
+4. idNumber: copy verbatim including leading zeros, even if digit count ≠ 9. \
+   A non-standard length is a data-quality signal — do NOT trim or pad.
+5. Preserve original language (Hebrew stays Hebrew, English stays English).
+6. If a field is genuinely blank (empty string in header), output "".  \
+   Never return null, "N/A", "-", or placeholder text.
 7. Output JSON only. No prose, no markdown fences.
 """
 
 # ---------------------------------------------------------------------------
-# Few-shot examples built around the new spatial-header OCR format.
+# Few-shot examples
 # ---------------------------------------------------------------------------
 
 FEW_SHOT_OCR = """\
@@ -126,7 +100,7 @@ Each field was extracted by collecting all words whose centre
 falls inside a calibrated bounding-box region for that field.
 Checkboxes are resolved from polygon-based selection marks.
 They are authoritative — use them verbatim and do NOT
-re-derive from the markdown body below.
+re-derive from the form body.
 
 -- Dates (DDMMYYYY, extracted from fixed coordinate regions) --
 formReceiptDateAtClinic: (not found)
@@ -145,57 +119,21 @@ landlinePhone:           (not found)
 
 healthFundMember (resolved): (none — no fund checkbox selected)
 
-=== FORM BODY (markdown OCR) ===
-
-=== FORM HEADER (formReceiptDateAtClinic, formFillingDate) ===
-המוסד לביטוח לאומי
-תאריך מילוי הטופס
-04042024
-שנה חודש יום
-
-=== SECTION 1: תאריך הפגיעה (dateOfInjury) ===
-תאריך הפגיעה
-03042024
-שנה חודש יום
-
-=== SECTION 2: פרטי התובע (lastName, firstName, idNumber, gender, dateOfBirth, address, phones) ===
-שם משפחה
-כהן
-שם פרטי
-דנה
-ת. ז.
-1 2 3 4 5 6 7 8 9
-מין
-☒ נקבה  ☐ זכר
-01021990
-שנה חודש יום
-
-| רחוב | מספר בית | כניסה | דירה | יישוב | מיקוד |
-| הרצל | 10 |  |  | תל אביב | 6100000 |
-
-טלפון נייד
-0501234567
-
-=== SECTION 3: פרטי התאונה (timeOfInjury, jobType, accidentLocation, accidentAddress, accidentDescription, injuredBodyPart) ===
-אני מבקש לקבל עזרה רפואית בגין פגיעה בעבודה שארעה לי
-09:30 כאשר עבדתי ב מהנדסת תוכנה
-סוג העבודה
-מקום התאונה: ☒ במפעל
-כתובת מקום התאונה
-דרך מנחם בגין 12, תל אביב
-נסיבות הפגיעה / תאור התאונה
-החלקתי על רצפה רטובה
-האיבר שנפגע
-גב תחתון
-
-=== SECTION 4: הצהרה (signature) ===
-דנה כהן
-שם המבקש
-חתימה X
-
-=== SECTION 5: למילוי ע"י המוסד הרפואי (healthFundMember, natureOfAccident, medicalDiagnoses) ===
-☐ כללית  ☐ מכבי  ☐ מאוחדת  ☐ לאומית
-מהות התאונה (אבחנות רפואיות):
+-- Free-text fields (extracted from fixed coordinate regions) --
+lastName:            כהן
+firstName:           דנה
+street:              הרצל
+houseNumber:         10
+entrance:
+apartment:
+city:                תל אביב
+postalCode:          6100000
+jobType:             מהנדסת תוכנה
+timeOfInjury:        09:30
+accidentAddress:     דרך מנחם בגין 12, תל אביב
+accidentDescription: החלקתי על רצפה רטובה
+injuredBodyPart:     גב תחתון
+applicantName:       דנה כהן
 """
 
 FEW_SHOT_JSON = {
@@ -232,15 +170,8 @@ FEW_SHOT_JSON = {
     },
 }
 
-# Negative / edge-case few-shot.
-# Key lessons:
-# (1) The spatial header's "(not found)" and "(none — …)" mean "" in JSON.
-# (2) The selected-checkbox list contains "הנפגע חבר בקופת חולים" (a
-#     membership-status label, NOT a fund name) but no fund is resolved →
-#     healthFundMember = "".
-# (3) accidentLocation is absent from the selected list → "".
-# (4) The Markdown body contains ☐ marks next to fund names — IGNORE them;
-#     only the resolved line in the spatial header counts.
+# Edge-case example: missing dates, blank address, no health-fund checkbox,
+# membership-status mark that does NOT set healthFundMember.
 FEW_SHOT_NEG_OCR = """\
 === FORM 283 SPATIAL EXTRACTION ===
 
@@ -249,7 +180,7 @@ Each field was extracted by collecting all words whose centre
 falls inside a calibrated bounding-box region for that field.
 Checkboxes are resolved from polygon-based selection marks.
 They are authoritative — use them verbatim and do NOT
-re-derive from the markdown body below.
+re-derive from the form body.
 
 -- Dates (DDMMYYYY, extracted from fixed coordinate regions) --
 formReceiptDateAtClinic: (not found)
@@ -268,52 +199,27 @@ landlinePhone:           (not found)
 
 healthFundMember (resolved): (none — no fund checkbox selected)
 
-=== FORM BODY (markdown OCR) ===
-
-=== FORM HEADER (formReceiptDateAtClinic, formFillingDate) ===
-טופס 283 - בקשה למתן טיפול רפואי
-
-=== SECTION 1: תאריך הפגיעה (dateOfInjury) ===
-10032024
-שנה חודש יום
-
-=== SECTION 2: פרטי התובע (lastName, firstName, idNumber, gender, dateOfBirth, address, phones) ===
-שם משפחה
-לוי
-שם פרטי
-רועי
-ת. ז.
-0 2 2 2 2 2 2 2 2 2
-מין
-☒ זכר
-15071985
-שנה חודש יום
-
-טלפון נייד
-0529876543
-
-=== SECTION 3: פרטי התאונה (timeOfInjury, jobType, accidentLocation, accidentAddress, accidentDescription, injuredBodyPart) ===
-14:20 כאשר עבדתי ב חשמלאי
-סוג העבודה
-נסיבות הפגיעה / תאור התאונה
-נפלתי מסולם בזמן עבודה
-האיבר שנפגע
-כתף ימין
-
-=== SECTION 4: הצהרה (signature) ===
-שם המבקש
-חתימה X
-
-=== SECTION 5: למילוי ע"י המוסד הרפואי (healthFundMember, natureOfAccident, medicalDiagnoses) ===
-☒ הנפגע חבר בקופת חולים
-☐ כללית  ☐ מאוחדת  ☐ מכבי  ☐ לאומית
-מהות התאונה (אבחנות רפואיות):
+-- Free-text fields (extracted from fixed coordinate regions) --
+lastName:            לוי
+firstName:           רועי
+street:              (not found)
+houseNumber:         (not found)
+entrance:
+apartment:
+city:                (not found)
+postalCode:
+jobType:             חשמלאי
+timeOfInjury:        14:20
+accidentAddress:
+accidentDescription: נפלתי מסולם בזמן עבודה
+injuredBodyPart:     כתף ימין
+applicantName:
 """
 
 FEW_SHOT_NEG_JSON = {
     "lastName": "לוי",
     "firstName": "רועי",
-    "idNumber": "0222222222",  # copied verbatim from spatial header
+    "idNumber": "0222222222",
     "gender": "זכר",
     "dateOfBirth": {"day": "15", "month": "07", "year": "1985"},
     "address": {
@@ -325,15 +231,14 @@ FEW_SHOT_NEG_JSON = {
     "jobType": "חשמלאי",
     "dateOfInjury": {"day": "10", "month": "03", "year": "2024"},
     "timeOfInjury": "14:20",
-    "accidentLocation": "",  # not in the selected-checkbox list
+    "accidentLocation": "",
     "accidentAddress": "",
     "accidentDescription": "נפלתי מסולם בזמן עבודה",
     "injuredBodyPart": "כתף ימין",
-    "signature": "",  # no handwritten name present
+    "signature": "",
     "formFillingDate": {"day": "", "month": "", "year": ""},
     "formReceiptDateAtClinic": {"day": "", "month": "", "year": ""},
     "medicalInstitutionFields": {
-        # Spatial header says "(none — no fund checkbox selected)" → ""
         "healthFundMember": "",
         "natureOfAccident": "",
         "medicalDiagnoses": "",
@@ -363,10 +268,9 @@ def extract(ocr_text: str, settings: Settings | None = None) -> ExtractedForm:
         # Positive example: filled form, straightforward extraction.
         {"role": "user", "content": f"OCR content:\n----- BEGIN -----\n{FEW_SHOT_OCR}\n----- END -----"},
         {"role": "assistant", "content": json.dumps(FEW_SHOT_JSON, ensure_ascii=False)},
-        # Negative example: missing dates in header, no fund resolved, blank
-        # signature & clinic section.  Demonstrates that "(not found)" /
-        # "(none — …)" in the spatial header → "" in JSON, and that body-text
-        # ☐/☒ symbols never override the header.
+        # Negative example: missing dates, no fund resolved, blank address &
+        # signature.  Demonstrates "(not found)" / "(none — …)" → "" in JSON,
+        # and that a membership-status checkbox does not set healthFundMember.
         {"role": "user", "content": f"OCR content:\n----- BEGIN -----\n{FEW_SHOT_NEG_OCR}\n----- END -----"},
         {"role": "assistant", "content": json.dumps(FEW_SHOT_NEG_JSON, ensure_ascii=False)},
         # Real request.

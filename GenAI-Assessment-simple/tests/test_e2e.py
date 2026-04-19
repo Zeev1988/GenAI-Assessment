@@ -183,17 +183,16 @@ def test_ocr_cache(stem: str) -> None:
     """Ensure OCR cache exists (or create it).  Fast no-op if already cached."""
     ocr_text = _get_ocr(stem)
     assert ocr_text, f"OCR returned empty text for {stem}"
-    # Sanity: the pre-processed OCR should always contain our spatial header
-    # and the Markdown form body.
+    # Sanity: OCR output is the spatial extraction header — all fields present.
     assert "=== FORM 283 SPATIAL EXTRACTION ===" in ocr_text, (
         "Spatial extraction header missing"
     )
-    assert "=== FORM BODY (markdown OCR) ===" in ocr_text, (
-        "Markdown form body header missing"
-    )
-    # The spatial header always lists these pre-computed field rows.
-    for key in ("formReceiptDateAtClinic:", "formFillingDate:", "dateOfInjury:",
-                "idNumber:", "mobilePhone:", "healthFundMember (resolved):"):
+    # Every expected field row must be present in the header.
+    for key in (
+        "formReceiptDateAtClinic:", "formFillingDate:", "dateOfInjury:",
+        "idNumber:", "mobilePhone:", "healthFundMember (resolved):",
+        "lastName:", "firstName:", "city:", "jobType:", "accidentDescription:",
+    ):
         assert key in ocr_text, f"Spatial header is missing field row: {key!r}"
 
 
@@ -239,8 +238,11 @@ def test_extraction_fields(stem: str) -> None:
     # make the failure message clearer)
     valid_genders = {"זכר", "נקבה", ""}
     valid_locations = {
-        "במפעל", "מחוץ למפעל", "בדרך לעבודה", "בדרך מהעבודה",
-        "ת. דרכים בעבודה", "אחר", "",
+        "במפעל", "מחוץ למפעל",
+        "ת. דרכים בעבודה",
+        "ת. דרכים בדרך לעבודה/מהעבודה",
+        "תאונה בדרך ללא רכב",
+        "אחר", "",
     }
     valid_funds = {"כללית", "מכבי", "מאוחדת", "לאומית", ""}
     assert data["gender"] in valid_genders, f"{stem}: invalid gender {data['gender']!r}"
