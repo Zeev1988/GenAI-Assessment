@@ -25,11 +25,9 @@ def run(data: bytes) -> PipelineResult:
     """Run OCR, extract fields, validate. Returns the form plus a report."""
     log.info("pipeline.start bytes=%d", len(data))
     t0 = time.perf_counter()
-    ocr_text = run_ocr(data)
-    form = extract(ocr_text)
-    # Pass ocr_text so the validator can run the grounding check that flags
-    # free-text values missing from the page (likely hallucinations).
-    report = validate(form, ocr_text=ocr_text)
+    ocr = run_ocr(data)
+    form = extract(ocr.markdown)
+    report = validate(form, ocr_text=ocr.markdown)
     elapsed_ms = int((time.perf_counter() - t0) * 1000)
     log.info(
         "pipeline.done filled=%d total=%d issues=%d elapsed_ms=%d",
@@ -42,7 +40,7 @@ def run(data: bytes) -> PipelineResult:
                 issue.field, issue.severity, issue.message,
             )
     _log_extracted_fields_debug(form)
-    return PipelineResult(form=form, report=report, ocr_text=ocr_text)
+    return PipelineResult(form=form, report=report, ocr_text=ocr.markdown)
 
 
 def _log_extracted_fields_debug(form: ExtractedForm) -> None:

@@ -1,60 +1,38 @@
-"""Run Azure Document Intelligence (prebuilt-layout) on an uploaded file.
+"""Azure Document Intelligence wrapper.
 
-The OCR stage produces a single ``=== FORM 283 SPATIAL EXTRACTION ===``
-document containing pre-computed key/value pairs for every field on Form 283.
-
-Two Azure DI data types are used — both coordinate-based:
-
-  * ``pages[].words[]`` — each word carries a polygon (bounding box in
-    inches).  For every text field we collect all words whose centre falls
-    inside a pre-calibrated region for that field (see ``field_regions.py``).
-    Words are then sorted into reading order: top-to-bottom across rows,
-    right-to-left within each Hebrew row.
-
-  * ``pages[].selection_marks[]`` — each checkbox carries a polygon and a
-    ``state`` attribute (selected / unselected).  We resolve the label of
-    every selected mark by checking whether its centre falls inside a
-    pre-calibrated bounding box for a known checkbox (see ``field_regions.py``,
-    ``CHECKBOXES_PAGE_1``).
-
-Because Form 283 is a fixed-layout government form the field positions are
-stable across every printed copy.
-
-Design rationale
-----------------
-A single coordinate-based method covers the entire form — no label-anchored
-regex, no Markdown stream parsing, no RTL fallback heuristics, no LLM needed
-for field location.  The LLM's only remaining job is to copy the structured
-header into a typed JSON schema and split DDMMYYYY dates into parts.
+Runs the ``prebuilt-layout`` model with Markdown output, which already
+handles reading order, renders tables with ``|`` cells, and emits
+selection marks as ``☒`` / ``☐`` glyphs inline. That is the single source
+of truth fed into the extractor — no coordinate post-processing, no
+bespoke per-field parsing.
 """
 
 from __future__ import annotations
 
 import logging
-import re
 import time
+from dataclasses import dataclass
 
 from azure.ai.documentintelligence import DocumentIntelligenceClient
-from azure.ai.documentintelligence.models import AnalyzeDocumentRequest
+from azure.ai.documentintelligence.models import (
+    AnalyzeDocumentRequest,
+    DocumentContentFormat,
+)
 from azure.core.credentials import AzureKeyCredential
 
 from form_extraction.core.config import Settings, get_settings
-from form_extraction.core.field_regions import CHECKBOXES_PAGE_1, PAGE_1
-from form_extraction.core.schemas import (
-    ACCIDENT_LOCATION_LABELS,
-    GENDER_LABELS,
-    HEALTH_FUND_LABELS,
-)
 
 log = logging.getLogger("form_extraction.ocr")
 
 
-# ---------------------------------------------------------------------------
-# Public entry point
-# ---------------------------------------------------------------------------
+@dataclass
+class OCRResult:
+    """Markdown rendering of the form, as produced by Azure DI."""
+    markdown: str
 
-def run_ocr(data: bytes, settings: Settings | None = None) -> str:
-    """Analyse the document and return OCR text annotated with spatial data."""
+
+def run_ocr(data: bytes, settings: Settings | None = None) -> OCRResult:
+    """Analyse *data* with Azure DI and return its Markdown rendering."""
     s = settings or get_settings()
     if not s.azure_doc_intelligence_endpoint or not s.azure_doc_intelligence_key.get_secret_value():
         raise RuntimeError(
@@ -74,6 +52,7 @@ def run_ocr(data: bytes, settings: Settings | None = None) -> str:
             model_id="prebuilt-layout",
             body=AnalyzeDocumentRequest(bytes_source=data),
             locale="he",
+            output_content_format=DocumentContentFormat.MARKDOWN,
         )
         result = poller.result()
 
@@ -82,416 +61,6 @@ def run_ocr(data: bytes, settings: Settings | None = None) -> str:
         log.warning("ocr.empty elapsed_ms=%d", elapsed_ms)
         raise RuntimeError("OCR returned no pages; the document may be blank or unreadable.")
 
-    # --- Extract text fields from Azure DI word coordinates ------------------
-    coord_fields = _extract_coordinate_fields(result)
-
-    # --- Extract checkboxes from Azure DI polygon selection marks ------------
-    selected = _extract_selected_checkboxes(result)
-    resolved = _resolve_enum_checkboxes(selected)
-
-    # --- Render the spatial extraction output --------------------------------
-    output = _render_spatial_header(coord_fields, selected, resolved)
-
-    # PII-safe log line: field counts only (values go to DEBUG in _log_fields).
-    filled = sum(1 for v in coord_fields.values() if v)
-    log.info(
-        "ocr.done chars=%d elapsed_ms=%d fields_filled=%d/%d checkboxes=%d "
-        "gender=%s location=%s fund=%s",
-        len(output), elapsed_ms, filled, len(coord_fields), len(selected),
-        "yes" if resolved["gender"] else "no",
-        "yes" if resolved["accident_location"] else "no",
-        "yes" if resolved["health_fund"] else "no",
-    )
-    _log_fields(coord_fields)
-    return output
-
-
-def _log_fields(fields: dict[str, str]) -> None:
-    """DEBUG-only log of raw field values (PII). Configure logging to DEBUG to see."""
-    if not log.isEnabledFor(logging.DEBUG):
-        return
-    for key, value in fields.items():
-        log.debug("ocr.field %-25s = %r", key, value)
-
-
-# ---------------------------------------------------------------------------
-# Polygon helpers (used by both text-field and checkbox extraction)
-# ---------------------------------------------------------------------------
-
-def _poly_center(polygon: list[float]) -> tuple[float, float]:
-    xs = polygon[0::2]
-    ys = polygon[1::2]
-    return sum(xs) / len(xs), sum(ys) / len(ys)
-
-
-# ---------------------------------------------------------------------------
-# Coordinate-based field extraction
-# ---------------------------------------------------------------------------
-
-_ROW_TOLERANCE = 0.12   # inches — words within this vertical distance are on the same row
-
-# Hebrew tokens that appear in the שם פרטי (first-name) bounding box but are
-# NOT part of the name itself. "עי" / "ס״ב" are the checksum-digit prefix
-# labels printed just to the left of the ID-number digit boxes; their centre
-# falls inside the first-name column on some copies of the form.
-_CHECKSUM_TOKENS: frozenset[str] = frozenset({"עי", "ס״ב"})
-
-# Printed column-header / field-label tokens stamped on the blank form.
-# Their centres fall inside the same bounding-box region as the user-written
-# content, so they must be stripped after spatial extraction.
-# NOTE: "בית" (from "מס׳ בית") rarely appears in Israeli street names as a
-# standalone token — acceptable trade-off for this fixed-layout government form.
-_FIELD_LABEL_TOKENS: dict[str, frozenset[str]] = {
-    "last_name":            frozenset({"שם", "משפחה"}),
-    "first_name":           frozenset({"שם", "פרטי"}),
-    # "רחוב / תא דואר" + "מס׳ בית" column headers
-    "street":               frozenset({"רחוב", "/", "תא", "דואר", "מס׳", "בית"}),
-    "entrance":             frozenset({"כניסה"}),
-    "apartment":            frozenset({"דירה"}),
-    "city":                 frozenset({"יישוב"}),
-    "accident_address":     frozenset({"כתובת", "מקום", "התאונה"}),
-    "accident_description": frozenset({"נסיבות", "הפגיעה", "/", "תאור", "התאונה"}),
-    "injured_body_part":    frozenset({"האיבר", "שנפגע"}),
-}
-
-
-def _strip_label_tokens(text: str, field: str) -> str:
-    """Remove printed form-label words from *text* for the given *field*."""
-    tokens = _FIELD_LABEL_TOKENS.get(field)
-    if not tokens:
-        return text
-    return " ".join(t for t in text.split() if t not in tokens).strip()
-
-
-def _extract_field_text(
-    page,
-    region: tuple[float, float, float, float],
-    rtl: bool = True,
-) -> str:
-    """Return the text of all words whose centre falls inside *region*.
-
-    Words are grouped into horizontal rows (by vertical proximity), then each
-    row is sorted right-to-left for Hebrew prose or left-to-right for numbers.
-    """
-    x0, y0, x1, y1 = region
-    collected: list[tuple[float, float, str]] = []
-
-    for word in (page.words or []):
-        poly = getattr(word, "polygon", None)
-        if not poly or len(poly) < 4:
-            continue
-        cx, cy = _poly_center(poly)
-        if x0 <= cx <= x1 and y0 <= cy <= y1:
-            collected.append((cy, cx, (word.content or "").strip()))
-
-    if not collected:
-        return ""
-
-    collected.sort(key=lambda w: w[0])  # top-to-bottom first
-    rows: list[list[tuple[float, float, str]]] = []
-    current_row: list[tuple[float, float, str]] = [collected[0]]
-    for word in collected[1:]:
-        if abs(word[0] - current_row[-1][0]) <= _ROW_TOLERANCE:
-            current_row.append(word)
-        else:
-            rows.append(current_row)
-            current_row = [word]
-    rows.append(current_row)
-
-    parts: list[str] = []
-    for row in rows:
-        row.sort(key=lambda w: -w[1] if rtl else w[1])
-        parts.append(" ".join(w[2] for w in row))
-
-    return " ".join(parts).strip()
-
-
-def _extract_digit_field(page, region: tuple[float, float, float, float]) -> str:
-    """Extract all words in *region* and return only the digit characters."""
-    raw = _extract_field_text(page, region, rtl=False)
-    return re.sub(r"\D", "", raw)
-
-
-def _extract_date_field(page, region: tuple[float, float, float, float]) -> str:
-    """Extract a date field and return DDMMYYYY (or '' if not found/parseable)."""
-    digits = _extract_digit_field(page, region)
-    if not digits:
-        return ""
-    parsed = _parse_ddmmyyyy(digits)
-    if parsed:
-        return parsed
-    # No unambiguous valid 8-digit window was found.  If we have at least
-    # 8 digits, surface the raw first 8 so the validator can flag the bad
-    # calendar date; the LLM sees the issue rather than a silent fabrication.
-    return digits[:8] if len(digits) >= 8 else ""
-
-
-def _split_street_or_pobox(raw: str) -> tuple[str, str]:
-    """Route the combined "רחוב / תא דואר" field into (street, po_box).
-
-    The single form row holds either a street name or a PO Box number.  If
-    every surviving token after label-stripping is all-digits we treat the
-    content as a PO Box; otherwise we keep the non-digit tokens as the
-    street name and drop any digit tokens (they bleed in from the adjacent
-    house-number column).
-    """
-    tokens = _strip_label_tokens(raw, "street").split()
-    if not tokens:
-        return "", ""
-    if all(t.isdigit() for t in tokens):
-        return "", " ".join(tokens)
-    return " ".join(t for t in tokens if not t.isdigit()), ""
-
-
-def _extract_coordinate_fields(result) -> dict[str, str]:
-    """Extract every free-text and numeric field on page 1 using bounding boxes.
-
-    Dates, ID, and phones use digit-only extraction; free-text fields use
-    RTL-aware text extraction with form-label tokens stripped.  Checkboxes
-    are handled separately by ``_extract_selected_checkboxes``.
-    """
-    page = result.pages[0]  # all form fields are on page 1
-
-    def _txt(key: str, rtl: bool = True) -> str:
-        return _extract_field_text(page, PAGE_1[key], rtl=rtl)
-
-    def _stripped(key: str, rtl: bool = True) -> str:
-        return _strip_label_tokens(_txt(key, rtl=rtl), key)
-
-    fields: dict[str, str] = {
-        # Dates (DDMMYYYY)
-        "receipt_date":   _extract_date_field(page, PAGE_1["receipt_date"]),
-        "filling_date":   _extract_date_field(page, PAGE_1["filling_date"]),
-        "injury_date":    _extract_date_field(page, PAGE_1["injury_date"]),
-        "birth_date":     _extract_date_field(page, PAGE_1["birth_date"]),
-        # Numeric identifiers & phones
-        "id_number":      _extract_digit_field(page, PAGE_1["id_number"]),
-        "mobile_phone":   _extract_digit_field(page, PAGE_1["mobile_phone"]),
-        "landline_phone": _extract_digit_field(page, PAGE_1["landline_phone"]),
-        "postal_code":    _extract_digit_field(page, PAGE_1["postal_code"]),
-        # Names — strip column-header label and checksum-prefix tokens
-        "last_name":  _stripped("last_name"),
-        "first_name": _strip_label_tokens(
-            " ".join(t for t in _txt("first_name").split() if t not in _CHECKSUM_TOKENS),
-            "first_name",
-        ),
-        # Address columns — street region is intentionally wide to catch long
-        # names; _split_street_or_pobox routes digit-only content into poBox.
-        **dict(zip(("street", "po_box"), _split_street_or_pobox(_txt("street")))),
-        "house_number": _extract_digit_field(page, PAGE_1["house_number"]),
-        "entrance":    _stripped("entrance", rtl=False),
-        "apartment":   _stripped("apartment", rtl=False),
-        "city":        _strip_label_tokens(
-            " ".join(t for t in _txt("city").split() if not t.isdigit()), "city"
-        ),
-        # Accident details
-        "job_type":             _txt("job_type"),
-        "time_of_injury":       _txt("time_of_injury", rtl=False),
-        "accident_address":     _stripped("accident_address"),
-        "accident_description": _stripped("accident_description"),
-        "injured_body_part":    _stripped("injured_body_part"),
-    }
-    return fields
-
-
-# ---------------------------------------------------------------------------
-# Date parsing (sliding-window, ambiguity-safe)
-# ---------------------------------------------------------------------------
-
-def _is_valid_date(day: int, month: int, year: int) -> bool:
-    return 1 <= day <= 31 and 1 <= month <= 12 and 1900 <= year <= 2100
-
-
-def _parse_ddmmyyyy(digits: str) -> str:
-    """Return an unambiguous DDMMYYYY calendar date from *digits*, else "".
-
-    Tries every contiguous 8-digit window (so a 9-digit string is handled by
-    trimming a single digit off either end).  If exactly one window parses as
-    a valid calendar date we return it; if **multiple** windows parse we log
-    a warning and return "" — ambiguous OCR reads must never be silently
-    disambiguated by guesswork.
-
-    Design note
-    -----------
-    A previous implementation also tried dropping a digit at every interior
-    position of a 9-digit string.  That was dangerous on medical / insurance
-    data: e.g. ``"120520023"`` had two disjoint valid windows (12/05/2002 and
-    12/05/2023) and the first-match-wins heuristic would pick one without
-    flagging the ambiguity.  Interior-drop recovery has been removed; the
-    validator now surfaces these cases for human review.
-    """
-    if len(digits) < 8:
-        return ""
-
-    candidates: list[str] = []
-    seen: set[str] = set()
-    for i in range(len(digits) - 7):
-        w = digits[i: i + 8]
-        if w in seen:
-            continue
-        seen.add(w)
-        try:
-            if _is_valid_date(int(w[:2]), int(w[2:4]), int(w[4:])):
-                candidates.append(w)
-        except ValueError:
-            continue
-
-    if len(candidates) == 1:
-        return candidates[0]
-
-    if len(candidates) > 1:
-        log.warning(
-            "ocr.date.ambiguous digits=%s candidates=%s — refusing to guess",
-            digits,
-            candidates,
-        )
-
-    return ""
-
-
-# ---------------------------------------------------------------------------
-# Rendering the spatial header (the full OCR output)
-# ---------------------------------------------------------------------------
-
-def _fmt_date(ddmmyyyy: str) -> str:
-    if len(ddmmyyyy) == 8 and ddmmyyyy.isdigit():
-        return f"{ddmmyyyy}  (day={ddmmyyyy[:2]}  month={ddmmyyyy[2:4]}  year={ddmmyyyy[4:]})"
-    return "(not found)"
-
-
-def _render_spatial_header(
-    coord_fields: dict[str, str],
-    selected: list[dict],
-    resolved: dict[str, str],
-) -> str:
-    def _val(key: str) -> str:
-        return coord_fields.get(key) or "(not found)"
-
-    def _opt(key: str) -> str:
-        """Optional field — blank is fine, don't say '(not found)'."""
-        return coord_fields.get(key) or ""
-
-    def _enum(key: str, none_msg: str) -> str:
-        return resolved.get(key) or f"(none — {none_msg})"
-
-    lines: list[str] = []
-    lines.append("=== FORM 283 SPATIAL EXTRACTION ===")
-    lines.append("")
-    lines.append("These values are pre-computed from Azure DI word coordinates.")
-    lines.append("Each field was extracted by collecting all words whose centre")
-    lines.append("falls inside a calibrated bounding-box region for that field.")
-    lines.append("Checkboxes are resolved from polygon-based selection marks.")
-    lines.append("They are authoritative — use them verbatim and do NOT")
-    lines.append("re-derive from the form body.")
-    lines.append("")
-    lines.append("-- Dates (DDMMYYYY, extracted from fixed coordinate regions) --")
-    lines.append(f"formReceiptDateAtClinic: {_fmt_date(coord_fields['receipt_date'])}")
-    lines.append(f"formFillingDate:         {_fmt_date(coord_fields['filling_date'])}")
-    lines.append(f"dateOfInjury:            {_fmt_date(coord_fields['injury_date'])}")
-    lines.append(f"dateOfBirth:             {_fmt_date(coord_fields['birth_date'])}")
-    lines.append("")
-    lines.append("-- Identifiers & phones --")
-    lines.append(f"idNumber:                {_val('id_number')}")
-    lines.append(f"mobilePhone:             {_val('mobile_phone')}")
-    lines.append(f"landlinePhone:           {_val('landline_phone')}")
-    lines.append("")
-    lines.append("-- Selected checkboxes (from Azure DI selection marks + coordinate region lookup) --")
-    if selected:
-        for mark in selected:
-            lines.append(
-                f"  [SELECTED] at ({mark['x']:.2f}, {mark['y']:.2f})  →  label: {mark['label']}"
-            )
-    else:
-        lines.append("  (no selection marks detected)")
-    lines.append("")
-    lines.append(f"gender (resolved):           {_enum('gender', 'no gender checkbox selected')}")
-    lines.append(f"accidentLocation (resolved): {_enum('accident_location', 'no accident-location checkbox selected')}")
-    lines.append(f"healthFundMember (resolved): {_enum('health_fund', 'no fund checkbox selected')}")
-    lines.append("")
-    lines.append("-- Free-text fields (extracted from fixed coordinate regions) --")
-    lines.append(f"lastName:            {_val('last_name')}")
-    lines.append(f"firstName:           {_val('first_name')}")
-    lines.append(f"street:              {_val('street')}")
-    lines.append(f"poBox:               {_opt('po_box')}")
-    lines.append(f"houseNumber:         {_val('house_number')}")
-    lines.append(f"entrance:            {_opt('entrance')}")
-    lines.append(f"apartment:           {_opt('apartment')}")
-    lines.append(f"city:                {_val('city')}")
-    lines.append(f"postalCode:          {_opt('postal_code')}")
-    lines.append(f"jobType:             {_opt('job_type')}")
-    lines.append(f"timeOfInjury:        {_opt('time_of_injury')}")
-    lines.append(f"accidentAddress:     {_opt('accident_address')}")
-    lines.append(f"accidentDescription: {_opt('accident_description')}")
-    lines.append(f"injuredBodyPart:     {_opt('injured_body_part')}")
-    lines.append("")
-    return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# Checkbox extraction — coordinate-based
-# ---------------------------------------------------------------------------
-
-# Map each schema enum field to the label set that can fill it.  Labels outside
-# every set (e.g. the "is a member" membership-status boxes) are kept in the
-# raw [SELECTED] list for traceability but are deliberately not an enum value
-# on any field.
-_ENUM_LABEL_SETS: dict[str, frozenset[str]] = {
-    "gender":            frozenset(GENDER_LABELS),
-    "accident_location": frozenset(ACCIDENT_LOCATION_LABELS),
-    "health_fund":       frozenset(HEALTH_FUND_LABELS),
-}
-
-
-def _extract_selected_checkboxes(result) -> list[dict]:
-    """Return one dict per selected checkbox, with label looked up from CHECKBOXES_PAGE_1.
-
-    For each Azure DI selection mark whose state is 'selected', we check
-    whether its centre falls inside one of the calibrated checkbox regions.
-    If it does, the hardcoded label is returned directly.  Marks that fall
-    outside every known region are silently ignored (likely stray marks or
-    form artefacts).
-    """
-    out: list[dict] = []
-    if not result.pages:
-        return out
-
-    for mark in (result.pages[0].selection_marks or []):
-        if (getattr(mark, "state", "") or "").lower() != "selected":
-            continue
-        polygon = getattr(mark, "polygon", None)
-        if not polygon or len(polygon) < 4:
-            continue
-
-        mcx, mcy = _poly_center(polygon)
-        label = None
-        for name, (x0, y0, x1, y1) in CHECKBOXES_PAGE_1.items():
-            if x0 <= mcx <= x1 and y0 <= mcy <= y1:
-                label = name
-                break
-
-        if label is None:
-            log.debug("ocr.checkbox.unmatched mark=(%.2f,%.2f)", mcx, mcy)
-            continue
-
-        log.debug("ocr.checkbox.sel mark=(%.2f,%.2f) → label=%r", mcx, mcy, label)
-        out.append({"x": mcx, "y": mcy, "label": label})
-
-    return out
-
-
-def _resolve_enum_checkboxes(selected: list[dict]) -> dict[str, str]:
-    """Pick the enum value, if any, for every checkbox-driven schema field.
-
-    Given the flat list returned by ``_extract_selected_checkboxes``, return a
-    dict mapping each enum field (gender / accident_location / health_fund) to
-    the single label that applies — or "" if no applicable checkbox is ticked.
-    Non-enum marks such as the "הנפגע חבר בקופת חולים" membership-status box
-    are ignored here; they stay in the raw [SELECTED] list for traceability.
-    """
-    return {
-        field: next(
-            (m["label"] for m in selected if m["label"] in labels),
-            "",
-        )
-        for field, labels in _ENUM_LABEL_SETS.items()
-    }
+    markdown = (result.content or "").strip()
+    log.info("ocr.done md_chars=%d elapsed_ms=%d", len(markdown), elapsed_ms)
+    return OCRResult(markdown=markdown)

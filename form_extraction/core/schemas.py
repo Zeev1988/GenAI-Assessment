@@ -4,9 +4,9 @@ Field names are camelCase on purpose — the assignment specifies the JSON keys.
 Every field defaults to "" so missing values are represented as empty strings.
 
 This module is the single source of truth for the three checkbox enums
-(gender, health fund, accident location). Every other module (field_regions,
-extractor prompt, tests) imports the label tuples from here so the four
-layers can never drift apart.
+(gender, health fund, accident location). The extractor prompt and the tests
+import the label tuples from here so the prompt's allowed-value lists, the
+JSON schema's ``enum`` arrays, and the test assertions can never drift apart.
 """
 
 from __future__ import annotations
@@ -19,9 +19,11 @@ from pydantic import BaseModel, ConfigDict, Field
 # Checkbox label tuples — single source of truth.
 #
 # The non-empty entries in each tuple correspond one-to-one to the labelled
-# checkboxes actually printed on Form 283. field_regions.CHECKBOXES_PAGE_1
-# uses these exact strings as its dict keys, and the extractor prompt builds
-# its allowed-value list from the same tuples.
+# checkboxes actually printed on Form 283. The extractor prompt builds its
+# allowed-value list from the same tuples, and the OpenAI ``json_schema`` we
+# send in structured-outputs mode turns them into the ``enum`` constraint,
+# so the LLM physically cannot return a fund / gender / location outside
+# this set.
 # ---------------------------------------------------------------------------
 
 GENDER_LABELS: tuple[str, ...] = ("זכר", "נקבה")

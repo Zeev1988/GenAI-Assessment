@@ -1,4 +1,4 @@
-"""Validation rules + completeness count."""
+"""Validation rules, completeness count, and grounding check."""
 
 from __future__ import annotations
 

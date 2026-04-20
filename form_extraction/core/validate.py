@@ -1,13 +1,14 @@
-"""Simple accuracy + completeness validation for an ExtractedForm.
+"""Post-extraction validation and completeness scoring.
 
-Accuracy here means "the values the LLM returned are in the format we
-expect for their field" — ID is 9 digits, phones start with 0, times are
-HH:MM, dates are real calendar dates. We deliberately stop there: any
-check that tries to reason about whether a field is semantically right
-(e.g. which checkbox the form marked) belongs in the LLM prompt, not in
-a rules engine.
+The extractor returns a schema-valid ``ExtractedForm`` (guaranteed by
+``response_format=json_schema`` in strict mode plus Pydantic). This
+module layers two observational checks on top:
 
-Completeness is a simple filled / total leaf count.
+  * **Format rules.** ID length, phone shape, HH:MM time, real
+    calendar dates. These are the few constraints the schema itself
+    cannot express.
+  * **Grounding.** Free-text values that do not appear as substrings
+    of the OCR Markdown are flagged as possible hallucinations.
 """
 
 from __future__ import annotations
@@ -17,7 +18,16 @@ from dataclasses import asdict, dataclass, field
 from datetime import date
 from typing import Any, Literal
 
+from form_extraction.core.digits import parse_numeric, warn_only_fields
 from form_extraction.core.schemas import DatePart, ExtractedForm
+
+# Fields in the digit registry whose parser result belongs to the
+# nested ``Address`` sub-model rather than the top-level form. Used
+# to look up the LLM's value when comparing against the parser's
+# reading for the warn-only check.
+_ADDRESS_FIELDS: frozenset[str] = frozenset(
+    {"street", "houseNumber", "entrance", "apartment", "city", "postalCode", "poBox"}
+)
 
 Severity = Literal["error", "warning"]
 
@@ -51,18 +61,16 @@ _MOBILE_RE = re.compile(r"^05\d{8}$")
 _LANDLINE_RE = re.compile(r"^0[234689]\d{7}$")
 _TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
-# Punctuation/whitespace we strip before grounding comparison. The OCR
-# frequently spaces Hebrew text differently than the extracted value, so we
-# keep only letters and digits — the characters that actually carry meaning.
+# We strip punctuation and whitespace before grounding comparison; OCR
+# frequently spaces Hebrew text differently than the extracted value, so
+# we keep only letters and digits — the characters that carry meaning.
 _GROUND_STRIP_RE = re.compile(r"[^\w]", flags=re.UNICODE)
 
-# Free-text fields worth grounding. We exclude:
-#   * structured/transformed fields (IDs, phones, dates, times) — their format
-#     validators already catch bogus values, and the model legitimately
-#     re-formats them (e.g. strips dashes).
-#   * enum fields (gender, accidentLocation, healthFundMember) — these come
-#     from checkbox resolution, not from the OCR body; grounding would
-#     produce false-positive hallucination warnings.
+# Free-text fields worth grounding. Structured/transformed fields (IDs,
+# phones, dates, times) are covered by format validators; enum fields
+# come from checkbox resolution rather than from the OCR body, so
+# substring grounding would produce false-positive hallucination
+# warnings on them.
 _GROUNDED_FIELDS: tuple[str, ...] = (
     "lastName",
     "firstName",
@@ -72,8 +80,8 @@ _GROUNDED_FIELDS: tuple[str, ...] = (
     "injuredBodyPart",
 )
 _GROUNDED_ADDRESS_FIELDS: tuple[str, ...] = ("street", "city")
-# Minimum length before we bother grounding. One- and two-character values
-# produce too many false positives (e.g. "X" matches any X in OCR).
+# Short values produce too many false positives (e.g. "X" appears in
+# many OCR contexts). Skip anything under this length.
 _MIN_GROUND_LEN = 3
 
 
@@ -104,17 +112,54 @@ def _normalize_for_ground(s: str) -> str:
     return _GROUND_STRIP_RE.sub("", s).casefold()
 
 
-def _check_grounding(form: ExtractedForm, ocr_text: str) -> list[Issue]:
-    """Flag free-text values that don't appear as substrings of the OCR.
+def _check_anchor_disagreement(
+    form: ExtractedForm, ocr_text: str
+) -> list[Issue]:
+    """Warn when the anchor-label parser reads a different value than the LLM.
 
-    This is an observational guardrail against LLM hallucination: any value
-    that isn't physically on the page is suspicious. We normalize
-    aggressively (strip punctuation / whitespace, casefold) to avoid false
-    positives caused by the LLM trimming or re-spacing a legitimate value.
-
-    Not corrective — we never blank fields; we only surface warnings so the
-    human reviewer can check the OCR tab.
+    This runs for fields the extractor does *not* silently override
+    because their structural check is too weak to trust over the LLM
+    (apartment, entrance, houseNumber). The parser's read is still
+    informative: when it disagrees with the LLM, something is off —
+    either the anchor window grabbed the wrong digit run, or the
+    LLM misread the box. We surface the mismatch as a warning and
+    leave the JSON alone; the reviewer decides which value is right.
     """
+    issues: list[Issue] = []
+    for field in warn_only_fields():
+        parsed = parse_numeric(ocr_text, field)
+        if parsed is None:
+            continue
+        if field in _ADDRESS_FIELDS:
+            llm_value = getattr(form.address, field, "")
+            path = f"address.{field}"
+        else:
+            llm_value = getattr(form, field, "")
+            path = field
+        if not llm_value:
+            # Parser read something, LLM left it empty — worth flagging
+            # so the reviewer can look, but without asserting the read
+            # is right.
+            issues.append(
+                Issue(
+                    path,
+                    "warning",
+                    f"Anchor-label parser read '{parsed}' but the extractor left this field empty.",
+                )
+            )
+        elif llm_value != parsed:
+            issues.append(
+                Issue(
+                    path,
+                    "warning",
+                    f"Anchor-label parser read '{parsed}' but the extractor returned '{llm_value}'.",
+                )
+            )
+    return issues
+
+
+def _check_grounding(form: ExtractedForm, ocr_text: str) -> list[Issue]:
+    """Flag free-text values that don't appear as substrings of the OCR."""
     normalized_ocr = _normalize_for_ground(ocr_text)
     issues: list[Issue] = []
 
@@ -181,6 +226,7 @@ def validate(form: ExtractedForm, ocr_text: str | None = None) -> ValidationRepo
             issues.append(Issue(name, "warning", "Date parts do not form a valid calendar date."))
 
     if ocr_text:
+        issues.extend(_check_anchor_disagreement(form, ocr_text))
         issues.extend(_check_grounding(form, ocr_text))
 
     data = form.model_dump()
