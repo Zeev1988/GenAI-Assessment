@@ -24,7 +24,6 @@ from chatbot.core.retrieval import (
     chunk_html_document,
 )
 
-
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _make_embedding_client(vectors: list[list[float]]) -> MagicMock:

@@ -15,8 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-from chatbot.core.knowledge import KnowledgeBase, TOPIC_TITLES, get_knowledge_base
-
+from chatbot.core.knowledge import TOPIC_TITLES, KnowledgeBase, get_knowledge_base
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 

@@ -17,7 +17,6 @@ from chatbot.core.prompts import (
     build_qa_system_prompt,
 )
 
-
 # ── Tool schema ────────────────────────────────────────────────────────────────
 
 class TestSubmitUserInfoTool:

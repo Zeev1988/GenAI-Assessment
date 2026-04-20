@@ -24,7 +24,6 @@ from fastapi.testclient import TestClient
 from chatbot.core.knowledge import KnowledgeBase
 from chatbot.core.retrieval import Retriever
 
-
 # ── Paths ──────────────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="session")

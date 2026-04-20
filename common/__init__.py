@@ -5,7 +5,7 @@ and one logger factory.  Anything larger belongs in the package that owns
 the specific concern.
 """
 
-from common.config import AzureOpenAISettings, ENV_FILE, PROJECT_ROOT
+from common.config import ENV_FILE, PROJECT_ROOT, AzureOpenAISettings
 from common.logger import get_logger
 
 __all__ = [

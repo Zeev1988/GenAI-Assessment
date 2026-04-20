@@ -23,7 +23,6 @@ from openai import APIError, APITimeoutError
 
 from tests.chatbot.conftest import _make_tool_call
 
-
 # ── Shared payload builders ────────────────────────────────────────────────────
 
 def collection_payload(messages=None, user_info=None):

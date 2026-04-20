@@ -37,7 +37,7 @@ import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
 
-from openai import AzureOpenAI, APIError
+from openai import APIError, AzureOpenAI
 
 from common import get_logger
 
