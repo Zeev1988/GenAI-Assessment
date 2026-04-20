@@ -41,7 +41,7 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP"]
-ignore = ["E501"]
+ignore = ["E501", "UP045"]
 
 [tool.ruff.lint.per-file-ignores]
 # The assignment mandates camelCase JSON keys; mirroring them in the schema.
