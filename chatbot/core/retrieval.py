@@ -134,13 +134,11 @@ def chunk_html_document(stem: str, topic_title: str, html: str) -> list[Chunk]:
         )
 
     # ── One chunk per service row ────────────────────────────────────────
-    header_html = ""
     header_text = ""
     for tr_html in _TR_RE.findall(html):
         if "<th" in tr_html.lower():
             # Capture the header row so its column labels (HMO names, etc.)
             # can be prepended to every service chunk for context.
-            header_html = tr_html
             header_text = _html_to_text(tr_html)
             continue
         tr_text = _html_to_text(tr_html)
