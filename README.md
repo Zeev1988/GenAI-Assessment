@@ -13,7 +13,7 @@ Uploads a Bituach Leumi Form 283 (PDF/JPG/PNG), runs Azure Document Intelligence
 **Stack:** Azure Document Intelligence · Azure OpenAI GPT-4o · Pydantic · Streamlit
 
 ```bash
-streamlit run form_extraction/ui/app.py
+python -m streamlit run form_extraction/ui/app.py
 ```
 
 → See [`form_extraction/README.md`](form_extraction/README.md) for full details.
@@ -31,7 +31,7 @@ A stateless FastAPI chatbot that answers questions about Israeli health-fund (ק
 python -m chatbot.api.main
 
 # Terminal 2 — UI
-streamlit run chatbot/ui/app.py
+python -m streamlit run chatbot/ui/app.py
 ```
 
 → See [`chatbot/README.md`](chatbot/README.md) for full details.
