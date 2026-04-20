@@ -146,7 +146,7 @@ _EXPECTED: dict[str, dict[str, Any]] = {
         "accidentAddress": "לוונברג 173 כפר סבא",
         "accidentDescription": "במהלך העבודה הרמתי משקל כבד וכתוצאה מכך הייתי צריך ניתוח קילה",
         "injuredBodyPart": "קילה",
-        "signature": "",
+        "signature": "רועי",
         "formFillingDate": {"day": "20", "month": "05", "year": "1999"},
         "formReceiptDateAtClinic": {"day": "30", "month": "06", "year": "1999"},
         "medicalInstitutionFields": {
@@ -279,12 +279,6 @@ def test_extraction_fields(stem: str) -> None:
         f"{stem}: invalid healthFundMember "
         f"{data['medicalInstitutionFields']['healthFundMember']!r}"
     )
-
-    # signature is always empty by design (see schemas.ExtractedForm).
-    assert data["signature"] == "", (
-        f"{stem}: signature should always be '' but was {data['signature']!r}"
-    )
-
     # --- Field-level assertions against _EXPECTED ----------------------------
 
     expected = _EXPECTED.get(stem, {})

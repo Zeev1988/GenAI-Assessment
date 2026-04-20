@@ -11,8 +11,9 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable
 from pathlib import Path
-from typing import Any, Awaitable, TypeVar
+from typing import Any, TypeVar
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
