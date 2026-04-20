@@ -1,7 +1,7 @@
 .venv/
 venv/
 env/
-GenAI-Assessment-simple/.env
+.env
 .env.*
 !.env.example
 

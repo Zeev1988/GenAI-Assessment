@@ -17,13 +17,11 @@ TestErrorHandling       LLM failures surfaced as correct HTTP codes
 
 from __future__ import annotations
 
-import json
 from unittest.mock import MagicMock
 
-import pytest
 from openai import APIError, APITimeoutError
 
-from chatbot.tests.conftest import _make_tool_call
+from tests.chatbot.conftest import _make_tool_call
 
 
 # ── Shared payload builders ────────────────────────────────────────────────────

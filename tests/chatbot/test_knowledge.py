@@ -29,13 +29,13 @@ def fresh_kb(path: Path) -> KnowledgeBase:
 # ── Loading: happy path ────────────────────────────────────────────────────────
 
 class TestLoading:
-    def test_loads_all_html_files(self, phase2_data_path):
-        kb = fresh_kb(phase2_data_path)
+    def test_loads_all_html_files(self, test_data_path):
+        kb = fresh_kb(test_data_path)
         assert kb.is_loaded()
         assert kb.topic_count() == 6
 
-    def test_all_expected_stems_present(self, phase2_data_path):
-        kb = fresh_kb(phase2_data_path)
+    def test_all_expected_stems_present(self, test_data_path):
+        kb = fresh_kb(test_data_path)
         expected_stems = {
             "alternative_services",
             "communication_clinic_services",
@@ -46,29 +46,29 @@ class TestLoading:
         }
         assert expected_stems == set(kb._content.keys())
 
-    def test_content_is_non_empty(self, phase2_data_path):
-        kb = fresh_kb(phase2_data_path)
+    def test_content_is_non_empty(self, test_data_path):
+        kb = fresh_kb(test_data_path)
         for stem, html in kb._content.items():
             assert len(html) > 0, f"Content for '{stem}' should not be empty"
 
-    def test_content_contains_html_tags(self, phase2_data_path):
-        kb = fresh_kb(phase2_data_path)
+    def test_content_contains_html_tags(self, test_data_path):
+        kb = fresh_kb(test_data_path)
         for stem, html in kb._content.items():
             assert "<" in html and ">" in html, (
                 f"Content for '{stem}' should contain HTML tags"
             )
 
-    def test_content_contains_hebrew(self, phase2_data_path):
+    def test_content_contains_hebrew(self, test_data_path):
         """Sanity-check that the Hebrew text was read correctly (UTF-8)."""
-        kb = fresh_kb(phase2_data_path)
+        kb = fresh_kb(test_data_path)
         combined = kb.all_content()
         # Every file mentions at least one HMO name.
         assert "מכבי" in combined
         assert "מאוחדת" in combined
         assert "כללית" in combined
 
-    def test_content_contains_all_tiers(self, phase2_data_path):
-        kb = fresh_kb(phase2_data_path)
+    def test_content_contains_all_tiers(self, test_data_path):
+        kb = fresh_kb(test_data_path)
         combined = kb.all_content()
         assert "זהב" in combined
         assert "כסף" in combined
@@ -116,8 +116,8 @@ class TestLoadingFailures:
 # ── Content retrieval ──────────────────────────────────────────────────────────
 
 class TestContentRetrieval:
-    def test_all_content_contains_topic_headings(self, phase2_data_path):
-        kb = fresh_kb(phase2_data_path)
+    def test_all_content_contains_topic_headings(self, test_data_path):
+        kb = fresh_kb(test_data_path)
         content = kb.all_content()
         # Each topic is introduced with "### TOPIC: <title>"
         for stem in kb._content:
@@ -126,18 +126,18 @@ class TestContentRetrieval:
                 f"Expected heading for topic '{stem}' in all_content()"
             )
 
-    def test_all_content_separates_topics(self, phase2_data_path):
-        kb = fresh_kb(phase2_data_path)
+    def test_all_content_separates_topics(self, test_data_path):
+        kb = fresh_kb(test_data_path)
         content = kb.all_content()
         # Topics are separated by a line of '=' characters.
         assert "=" * 40 in content
 
-    def test_topic_titles_length_matches_topic_count(self, phase2_data_path):
-        kb = fresh_kb(phase2_data_path)
+    def test_topic_titles_length_matches_topic_count(self, test_data_path):
+        kb = fresh_kb(test_data_path)
         assert len(kb.topic_titles()) == kb.topic_count()
 
-    def test_topic_titles_are_strings(self, phase2_data_path):
-        kb = fresh_kb(phase2_data_path)
+    def test_topic_titles_are_strings(self, test_data_path):
+        kb = fresh_kb(test_data_path)
         for title in kb.topic_titles():
             assert isinstance(title, str) and len(title) > 0
 

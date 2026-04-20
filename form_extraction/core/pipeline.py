@@ -35,15 +35,20 @@ def run(data: bytes) -> PipelineResult:
         "pipeline.done filled=%d total=%d issues=%d elapsed_ms=%d",
         report.filled, report.total, len(report.issues), elapsed_ms,
     )
-    _log_extracted_fields(form)
     if report.issues:
         for issue in report.issues:
-            log.info("pipeline.issue field=%s severity=%s msg=%s", issue.field, issue.severity, issue.message)
+            log.info(
+                "pipeline.issue field=%s severity=%s msg=%s",
+                issue.field, issue.severity, issue.message,
+            )
+    _log_extracted_fields_debug(form)
     return PipelineResult(form=form, report=report, ocr_text=ocr_text)
 
 
-def _log_extracted_fields(form: ExtractedForm) -> None:
-    """Log every leaf field: filled ones at INFO, empty ones at WARNING."""
+def _log_extracted_fields_debug(form: ExtractedForm) -> None:
+    """DEBUG-only per-field log. PII-safe by default — enable DEBUG to see."""
+    if not log.isEnabledFor(logging.DEBUG):
+        return
     d = form.model_dump()
 
     def _walk(node: object, path: str) -> None:
@@ -52,8 +57,8 @@ def _log_extracted_fields(form: ExtractedForm) -> None:
                 _walk(v, f"{path}.{k}" if path else k)
         elif isinstance(node, str):
             if node.strip():
-                log.info("pipeline.field  %-45s = %r", path, node)
+                log.debug("pipeline.field %-45s = %r", path, node)
             else:
-                log.warning("pipeline.field  %-45s = <empty>", path)
+                log.debug("pipeline.field %-45s = <empty>", path)
 
     _walk(d, "")

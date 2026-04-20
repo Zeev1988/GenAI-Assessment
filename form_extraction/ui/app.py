@@ -38,14 +38,22 @@ st.caption(
     "and a small rule check flags obvious format errors."
 )
 
-SAMPLE_DIR = Path(__file__).resolve().parents[2] / "phase1_data"
+# Look for sample PDFs in the two locations we support: the assignment's
+# original `phase1_data/` next to the repo, and the test fixtures shipped
+# under `tests/test_data/phase1_data/`.
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_SAMPLE_DIRS = (
+    _PROJECT_ROOT / "phase1_data",
+    _PROJECT_ROOT / "tests" / "test_data" / "phase1_data",
+)
 
 
 def _find_sample() -> Path | None:
-    if not SAMPLE_DIR.is_dir():
-        return None
-    for pdf in sorted(SAMPLE_DIR.glob("283_ex*.pdf")):
-        return pdf
+    for sample_dir in _SAMPLE_DIRS:
+        if not sample_dir.is_dir():
+            continue
+        for pdf in sorted(sample_dir.glob("283_ex*.pdf")):
+            return pdf
     return None
 
 

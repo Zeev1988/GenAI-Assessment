@@ -15,14 +15,12 @@ from form_extraction.core import run
 
 pytestmark = pytest.mark.integration
 
-_REPO = Path(__file__).resolve().parents[1]
+TEST_DIR = Path(__file__).resolve().parents[0]
+DATA_DIR = TEST_DIR / "test_data"
 
 
 def _sample_pdfs() -> list[Path]:
-    for candidate in (_REPO / "phase1_data", _REPO.parent / "phase1_data"):
-        if candidate.is_dir():
-            return sorted(candidate.glob("283_ex*.pdf"))
-    return []
+    return sorted(DATA_DIR.glob("283_ex*.pdf")) if DATA_DIR.is_dir() else []
 
 
 @pytest.fixture(autouse=True)
@@ -34,7 +32,7 @@ def _skip_unless_enabled() -> None:
 def test_pipeline_on_first_sample() -> None:
     pdfs = _sample_pdfs()
     if not pdfs:
-        pytest.skip("No 283_ex*.pdf samples found; set PHASE1_DATA_DIR or place files in phase1_data/.")
+        pytest.skip(f"No 283_ex*.pdf samples found in {DATA_DIR}")
 
     result = run(pdfs[0].read_bytes())
     assert result.ocr_text, "OCR produced no text"

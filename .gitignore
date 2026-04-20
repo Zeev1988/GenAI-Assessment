@@ -1,36 +1,29 @@
-# Python
+# Virtual environments
+GenAI-Assessment-simple/.venv/
+venv/
+
+# Python bytecode / caches
 __pycache__/
-*.py[cod]
-*.egg-info/
-.eggs/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+
+# Packaging / build artifacts
 build/
 dist/
-.venv/
-venv/
-env/
+*.egg-info/
 
-# Env & secrets
-GenAI-Assessment-simple/.env
-.env.*
-!.env.example
+# Environment secrets
+.env
 
-# Caches
-.cache/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-coverage.xml
-htmlcov/
-
-# IDE / OS
+# IDE / OS metadata
 .idea/
 .vscode/
 .DS_Store
 
-# Streamlit
-.streamlit/secrets.toml
+# OCR cache — generated on first integration run
+tests/fixtures/ocr_cache/*.txt
 
-# Logs
+# teset logs
 *.log
-logs/

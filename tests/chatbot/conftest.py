@@ -3,7 +3,7 @@ Shared pytest fixtures for the chatbot test suite.
 
 Fixture hierarchy
 -----------------
-phase2_data_path          Path to the real HTML knowledge-base files
+test_data_path          Path to the real HTML knowledge-base files
 sample_user_info          Minimal valid member dict used across tests
 make_llm_response         Factory that builds mock OpenAI chat-completion responses
 mock_kb                   A pre-loaded KnowledgeBase instance with synthetic content
@@ -26,10 +26,9 @@ from chatbot.core.knowledge import KnowledgeBase
 # ── Paths ──────────────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="session")
-def phase2_data_path() -> Path:
+def test_data_path() -> Path:
     """Absolute path to the real HTML knowledge-base directory."""
-    root = Path(__file__).resolve().parents[3]
-    return root / "tests" / "test_data" / "phase2_data"
+    return Path(__file__).parent / "test_data"
 
 
 # ── Domain fixtures ────────────────────────────────────────────────────────────
