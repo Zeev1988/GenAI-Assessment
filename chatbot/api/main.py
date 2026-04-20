@@ -11,24 +11,28 @@ Design principles
       signals completion by calling the ``submit_user_info`` tool.
     - ``qa``         — LLM answers health-fund questions using the HTML
       knowledge base and the member's profile.
-• **Concurrent users**: FastAPI's async request handling + a single shared
-  (thread-safe) Azure OpenAI client supports many simultaneous sessions.
+• **True async concurrency**: the route is ``async def`` and the LLM / embedding
+  calls go through ``AsyncAzureOpenAI`` with ``await``, so a single request
+  never blocks the event loop while waiting on the model.  Dozens of sessions
+  can be in flight at once on a single uvicorn worker.
+• **Dependency injection**: the shared OpenAI client and the Retriever are
+  built once in ``lifespan`` and handed to the route via FastAPI's
+  ``Depends()``.  Tests override them with ``app.dependency_overrides``.
 """
 
 from __future__ import annotations
 
 import json
-import re
 import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from openai import APIConnectionError, APIError, APITimeoutError, AzureOpenAI
+from openai import APIConnectionError, APIError, APITimeoutError, AsyncAzureOpenAI
 from pydantic import BaseModel, Field, field_validator
 
 from common import get_logger
@@ -74,19 +78,17 @@ class ChatRequest(BaseModel):
         default=None,
         description="Confirmed member data — required when phase='qa'.",
     )
-    # Typed confirmation channel (preferred over text sniffing).
-    #
-    # Set by the UI *only* in response to an explicit user action — e.g., the
-    # user clicking "Confirm" on the dialog the frontend rendered after the
-    # LLM called ``request_user_confirmation``.  When True, the backend will
-    # accept a subsequent ``submit_user_info`` tool call without having to
-    # classify the user's free-text reply.
+    # Typed confirmation channel — the only path by which the backend will
+    # accept a ``submit_user_info`` tool call.  Set by the UI only in
+    # response to an explicit user action (e.g., clicking "Confirm" on the
+    # dialog the frontend rendered after the LLM called
+    # ``request_user_confirmation``).
     user_confirmed: bool = Field(
         default=False,
         description=(
             "True when the UI is relaying an explicit user confirmation "
-            "(e.g., a confirm-button click).  Legacy clients can omit this "
-            "and rely on the text-based fallback gate."
+            "(e.g., a confirm-button click).  Required to open the "
+            "submit_user_info gate."
         ),
     )
     confirmed_data: Optional[dict[str, Any]] = Field(
@@ -146,16 +148,44 @@ class ChatResponse(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load the knowledge base and build the ADA-002 retrieval index."""
+    """Build the shared Async OpenAI client, Retriever, and embedding index.
+
+    The client and retriever live on ``app.state`` so they're reachable from
+    the ``Depends()`` providers below (see ``get_client`` / ``get_retriever``).
+    """
     logger.info("=== HMO Chatbot API starting up ===")
+
+    client = AsyncAzureOpenAI(
+        azure_endpoint=settings.azure_openai_endpoint,
+        api_key=settings.azure_openai_key.get_secret_value(),
+        api_version=settings.azure_openai_api_version,
+        timeout=settings.request_timeout_s,
+        max_retries=3,
+    )
+    logger.info(
+        "AsyncAzureOpenAI client initialised (deployment=%s, api_version=%s)",
+        settings.azure_openai_deployment,
+        settings.azure_openai_api_version,
+    )
+    retriever = Retriever(
+        client=client,
+        embedding_deployment=settings.azure_openai_embedding_deployment,
+    )
+    app.state.openai_client = client
+    app.state.retriever = retriever
+
     kb = get_knowledge_base()
     if not kb.is_loaded():
         logger.error("Knowledge base NOT loaded — Q&A will not work")
     else:
         logger.info("Knowledge base ready: %d topics loaded", kb.topic_count())
-        _get_retriever().index(kb.chunks())
-    yield
-    logger.info("=== HMO Chatbot API shutting down ===")
+        await retriever.index(kb.chunks())
+
+    try:
+        yield
+    finally:
+        await client.close()
+        logger.info("=== HMO Chatbot API shutting down ===")
 
 
 # ── FastAPI application ────────────────────────────────────────────────────────
@@ -179,45 +209,30 @@ app.add_middleware(
 )
 
 
-# ── Azure OpenAI client ────────────────────────────────────────────────────────
+# ── Dependency providers ───────────────────────────────────────────────────────
+#
+# FastAPI resolves these per request.  In production they read from the
+# singletons stored on ``app.state`` by ``lifespan``.  In tests we override
+# them via ``app.dependency_overrides`` to inject mocks.
 
-_client: Optional[AzureOpenAI] = None
-_retriever: Optional[Retriever] = None
-
-
-def _get_client() -> AzureOpenAI:
-    """Return the singleton Azure OpenAI client, creating it on first call."""
-    global _client
-    if _client is None:
-        _client = AzureOpenAI(
-            azure_endpoint=settings.azure_openai_endpoint,
-            api_key=settings.azure_openai_key.get_secret_value(),
-            api_version=settings.azure_openai_api_version,
-            timeout=settings.request_timeout_s,
-            # The SDK retries with exponential back-off on 429 / 503 /
-            # connection errors.  3 attempts strikes a balance between
-            # resilience and not hammering a rate-limited endpoint.
-            # Note: APITimeoutError is intentionally NOT retried by the SDK
-            # (we surface it as a 504 so the client can decide).
-            max_retries=3,
+def get_client(request: Request) -> AsyncAzureOpenAI:
+    """Return the process-wide AsyncAzureOpenAI client built in ``lifespan``."""
+    client = getattr(request.app.state, "openai_client", None)
+    if client is None:  # pragma: no cover — defensive
+        raise RuntimeError(
+            "OpenAI client not initialised — lifespan did not run."
         )
-        logger.info(
-            "Azure OpenAI client initialised (deployment=%s, api_version=%s)",
-            settings.azure_openai_deployment,
-            settings.azure_openai_api_version,
-        )
-    return _client
+    return client
 
 
-def _get_retriever() -> Retriever:
-    """Return the singleton Retriever, creating it on first call."""
-    global _retriever
-    if _retriever is None:
-        _retriever = Retriever(
-            client=_get_client(),
-            embedding_deployment=settings.azure_openai_embedding_deployment,
+def get_retriever(request: Request) -> Retriever:
+    """Return the process-wide Retriever built in ``lifespan``."""
+    retriever = getattr(request.app.state, "retriever", None)
+    if retriever is None:  # pragma: no cover — defensive
+        raise RuntimeError(
+            "Retriever not initialised — lifespan did not run."
         )
-    return _retriever
+    return retriever
 
 
 # ── LLM helpers ───────────────────────────────────────────────────────────────
@@ -232,13 +247,13 @@ def _openai_messages(
     return msgs
 
 
-def _call_llm(
+async def _call_llm(
+    client: AsyncAzureOpenAI,
     messages: list[dict],
     request_id: str,
     tools: Optional[list[dict]] = None,
 ) -> Any:
     """Call Azure OpenAI and return the raw response, with structured error handling."""
-    client = _get_client()
     kwargs: dict[str, Any] = {
         "model": settings.azure_openai_deployment,
         "messages": messages,
@@ -254,7 +269,7 @@ def _call_llm(
             len(messages),
             bool(tools),
         )
-        response = client.chat.completions.create(**kwargs)
+        response = await client.chat.completions.create(**kwargs)
         usage = response.usage
         if usage:
             logger.info(
@@ -292,85 +307,22 @@ def _call_llm(
 
 # ── Phase handlers ─────────────────────────────────────────────────────────────
 
-# ── Confirmation-gate helpers ─────────────────────────────────────────────────
+# ── Confirmation gate ─────────────────────────────────────────────────────────
 #
 # The assignment mandates a stateless microservice — all session state lives
 # client-side.  So we can't store a "user confirmed" flag on the server.
 #
-# Two confirmation channels are supported, in priority order:
+# Instead the UI relays confirmation as a typed boolean on the payload
+# (``ChatRequest.user_confirmed``).  Only an explicit, unambiguous user
+# action (e.g. clicking "Confirm" on the dialog rendered after the LLM
+# called ``request_user_confirmation``) sets that flag.  No free-text
+# classification is performed — an LLM-fired ``submit_user_info`` tool call
+# without the flag is rejected and the data is surfaced back to the UI as
+# a pending confirmation, so the user can click Confirm instead.
 #
-#   1. Typed payload flag (preferred).  ``ChatRequest.user_confirmed=True``
-#      means the UI is relaying an explicit, unambiguous user action — e.g.
-#      a "Confirm" button click on the dialog rendered after the LLM called
-#      ``request_user_confirmation``.  No text classification is needed.
-#
-#   2. Text-based fallback (legacy).  If the UI doesn't set the typed flag
-#      (older client, or first call before the confirm dialog exists), we
-#      fall back to inspecting the latest user turn in the messages array
-#      for an affirmative phrase.  Lower precision — but a backstop so the
-#      tool-call gate never opens purely because the LLM fired the tool.
-#
-# Either way the check operates purely on the payload the client sends us,
-# so architectural statelessness is preserved.
-
-# Affirmative phrases recognised by the text-based fallback gate.  We
-# deliberately keep the list short and high-precision: a false negative
-# (user re-confirms) is cheaper than a false positive (tool call fires
-# before the user agreed).
-_CONFIRM_TOKENS_HE: frozenset[str] = frozenset({
-    "כן", "אישור", "מאשר", "מאשרת", "נכון", "בסדר", "אוקיי", "אוקי",
-    "מסכים", "מסכימה", "מאשר/ת", "הכל נכון", "הכול נכון", "ללא שינויים",
-})
-_CONFIRM_TOKENS_EN: frozenset[str] = frozenset({
-    "yes", "yep", "yeah", "correct", "confirm", "confirmed", "confirming",
-    "that's right", "thats right", "all correct", "looks good", "lgtm",
-    "approved", "approve", "go ahead", "ok", "okay",
-})
-# Words that negate a confirmation — if any appear in the same turn, we
-# assume the user is correcting something and refuse the tool call.
-_NEGATION_TOKENS: frozenset[str] = frozenset({
-    "לא", "תקן", "לתקן", "שנה", "שני", "שינוי", "שגוי", "טעות", "לא נכון",
-    "no", "not", "wrong", "incorrect", "change", "correct ", "fix", "edit",
-    "update", "actually",
-})
-
-_WORD_RE = re.compile(r"[\w']+", re.UNICODE)
-
-
-def _is_affirmative(text: str) -> bool:
-    """Return True iff *text* reads as an unambiguous user confirmation."""
-    normalised = (text or "").strip().lower()
-    if not normalised:
-        return False
-    tokens = _WORD_RE.findall(normalised)
-    if not tokens:
-        return False
-    token_set = set(tokens)
-    # Check phrase-level matches first so multi-word confirmations/negations
-    # ("that's right", "לא נכון") aren't tripped up by the tokeniser.
-    for phrase in _NEGATION_TOKENS:
-        if " " in phrase and phrase in normalised:
-            return False
-    for phrase in _CONFIRM_TOKENS_HE | _CONFIRM_TOKENS_EN:
-        if " " in phrase and phrase in normalised:
-            # Still bail out if a negation token is also present.
-            return not any(neg in token_set for neg in _NEGATION_TOKENS if " " not in neg)
-
-    if any(neg in token_set for neg in _NEGATION_TOKENS if " " not in neg):
-        return False
-    return bool(token_set & (_CONFIRM_TOKENS_HE | _CONFIRM_TOKENS_EN))
-
-
-def _confirmation_present(messages: list[Message]) -> bool:
-    """True iff the latest user turn in *messages* reads as a confirmation.
-
-    We look at the message history the client sent us and check the most
-    recent ``user`` turn.  No server-side state is consulted.
-    """
-    for m in reversed(messages):
-        if m.role == "user":
-            return _is_affirmative(m.content)
-    return False
+# This keeps the gate deterministic and auditable: the submit step requires
+# a user action, never a stochastic decision.  The check operates purely on
+# the payload the client sends us, so statelessness is preserved.
 
 
 def _parse_tool_arguments(
@@ -393,7 +345,6 @@ def _confirmation_gate_passes(
     req_user_confirmed: bool,
     confirmed_data: Optional[dict[str, Any]],
     tool_args: dict[str, Any],
-    messages: list[Message],
     request_id: str,
 ) -> tuple[bool, str]:
     """Decide whether a submit_user_info tool call should be accepted.
@@ -401,33 +352,26 @@ def _confirmation_gate_passes(
     Returns (passed, reason).  ``reason`` is a short label used for logging
     so we can tell at-a-glance *why* the gate opened (or didn't).
     """
-    # 1) Typed payload flag — preferred path.  When the UI sets this, the
-    #    user just clicked a confirm button and we trust the action.  We
-    #    additionally cross-check ``confirmed_data`` (if provided) against
-    #    the tool arguments so the LLM can't quietly swap a field between
-    #    the review dialog and the final submit.
-    if req_user_confirmed:
-        if confirmed_data is not None and confirmed_data != tool_args:
-            logger.warning(
-                "[%s] user_confirmed=True but confirmed_data != tool args — "
-                "refusing submit. diff_keys=%s",
-                request_id,
-                sorted(set(confirmed_data) ^ set(tool_args))
-                or [k for k in tool_args if confirmed_data.get(k) != tool_args.get(k)],
-            )
-            return False, "data_mismatch"
-        return True, "typed_flag"
+    if not req_user_confirmed:
+        return False, "no_confirmation"
 
-    # 2) Legacy text-based fallback — only consulted when the typed flag is
-    #    absent.  Keeps the old Streamlit client working until it's upgraded
-    #    to send ``user_confirmed``.
-    if _confirmation_present(messages):
-        return True, "text_fallback"
-
-    return False, "no_confirmation"
+    # Cross-check ``confirmed_data`` (if provided) against the tool
+    # arguments so the LLM can't quietly swap a field between the review
+    # dialog and the final submit.
+    if confirmed_data is not None and confirmed_data != tool_args:
+        logger.warning(
+            "[%s] user_confirmed=True but confirmed_data != tool args — "
+            "refusing submit. diff_keys=%s",
+            request_id,
+            sorted(set(confirmed_data) ^ set(tool_args))
+            or [k for k in tool_args if confirmed_data.get(k) != tool_args.get(k)],
+        )
+        return False, "data_mismatch"
+    return True, "typed_flag"
 
 
-def _handle_collection(
+async def _handle_collection(
+    client: AsyncAzureOpenAI,
     messages: list[Message],
     request_id: str,
     user_confirmed: bool = False,
@@ -443,9 +387,9 @@ def _handle_collection(
       UI, which shows an explicit confirm dialog; no phase transition yet.
 
     • ``submit_user_info`` — finalises registration and transitions to Q&A.
-      Gated by the two-channel confirmation check in
-      ``_confirmation_gate_passes``: either the typed ``user_confirmed``
-      flag (preferred) or the legacy text-based fallback.
+      Gated by ``_confirmation_gate_passes``: requires the typed
+      ``user_confirmed`` flag (and, if supplied, ``confirmed_data`` matching
+      the tool arguments).
     """
     # On the very first load (empty history) inject a hidden 'start' signal
     # so the LLM produces an opening greeting without requiring user input.
@@ -464,7 +408,8 @@ def _handle_collection(
         )
 
     openai_msgs = _openai_messages(COLLECTION_SYSTEM_PROMPT, effective_messages)
-    response = _call_llm(
+    response = await _call_llm(
+        client,
         openai_msgs,
         request_id,
         tools=[REQUEST_USER_CONFIRMATION_TOOL, SUBMIT_USER_INFO_TOOL],
@@ -509,7 +454,6 @@ def _handle_collection(
                 req_user_confirmed=user_confirmed,
                 confirmed_data=confirmed_data,
                 tool_args=user_info,
-                messages=messages,
                 request_id=request_id,
             )
             if not passed:
@@ -634,7 +578,9 @@ def _full_kb_chunks(request_id: str) -> list[Any]:
     return chunks
 
 
-def _handle_qa(
+async def _handle_qa(
+    client: AsyncAzureOpenAI,
+    retriever: Retriever,
     messages: list[Message],
     user_info: dict[str, Any],
     request_id: str,
@@ -646,11 +592,10 @@ def _handle_qa(
     enough for GPT-4o's context window).  Only when the KB itself is
     unavailable do we surface a 503.
     """
-    retriever = _get_retriever()
     retrieval_query = _build_retrieval_query(messages)
 
     if retriever.is_ready():
-        results = retriever.search(retrieval_query, settings.retrieval_top_k)
+        results = await retriever.search(retrieval_query, settings.retrieval_top_k)
         if not results:
             # The index is healthy but the query is empty or embedding failed.
             # Prefer full-KB fallback over a blank 502: the user still gets
@@ -705,7 +650,7 @@ def _handle_qa(
         scores_preview,
     )
 
-    response = _call_llm(openai_msgs, request_id)
+    response = await _call_llm(client, openai_msgs, request_id)
     answer: str = response.choices[0].message.content or ""
 
     logger.info("[%s] Q&A answer generated (%d chars, mode=%s)", request_id, len(answer), mode)
@@ -719,10 +664,9 @@ def _handle_qa(
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 @app.get("/health", summary="Health check")
-async def health_check():
+async def health_check(retriever: Retriever = Depends(get_retriever)):
     """Returns service status, knowledge-base readiness, and retriever status."""
     kb = get_knowledge_base()
-    retriever = _get_retriever()
     return {
         "status": "ok",
         "knowledge_base_loaded": kb.is_loaded(),
@@ -747,7 +691,11 @@ async def health_check():
         "with each request.  Returns the assistant reply and any phase transition."
     ),
 )
-async def chat(req: ChatRequest):
+async def chat(
+    req: ChatRequest,
+    client: AsyncAzureOpenAI = Depends(get_client),
+    retriever: Retriever = Depends(get_retriever),
+):
     start = time.perf_counter()
     logger.info(
         "POST /api/v1/chat | request_id=%s | phase=%s | msgs=%d",
@@ -757,7 +705,8 @@ async def chat(req: ChatRequest):
     )
 
     if req.phase == "collection":
-        result = _handle_collection(
+        result = await _handle_collection(
+            client,
             req.messages,
             req.request_id,
             user_confirmed=req.user_confirmed,
@@ -773,7 +722,9 @@ async def chat(req: ChatRequest):
                 status_code=422,
                 detail="user_info is required for the Q&A phase.",
             )
-        result = _handle_qa(req.messages, req.user_info, req.request_id)
+        result = await _handle_qa(
+            client, retriever, req.messages, req.user_info, req.request_id
+        )
 
     elapsed_ms = int((time.perf_counter() - start) * 1000)
     result.processing_time_ms = elapsed_ms

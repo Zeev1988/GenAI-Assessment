@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -124,12 +124,19 @@ def mock_retriever(mock_kb) -> MagicMock:
     tests can override ``mock_retriever.search.return_value`` to tune ranking,
     or ``mock_retriever.is_ready.return_value = False`` to simulate an
     unready index.
+
+    Notes on async:  ``Retriever.search`` is ``async def`` in production, so
+    we expose it as an ``AsyncMock``.  ``is_ready`` / ``chunk_count`` stay
+    synchronous.
     """
     chunks = mock_kb.chunks()[:2]
     retriever = MagicMock(spec=Retriever)
     retriever.is_ready.return_value = True
     retriever.chunk_count.return_value = len(chunks)
-    retriever.search.return_value = [(c, 0.9 - 0.1 * i) for i, c in enumerate(chunks)]
+    retriever.search = AsyncMock(
+        return_value=[(c, 0.9 - 0.1 * i) for i, c in enumerate(chunks)]
+    )
+    retriever.index = AsyncMock(return_value=None)
     return retriever
 
 
@@ -142,21 +149,36 @@ def api_client(mock_kb, mock_retriever) -> TestClient:
 
     The Azure OpenAI client, knowledge base, and retriever are all mocked so
     the tests never hit external services.  Individual tests override
-    ``_mock_openai.chat.completions.create`` to return specific responses.
+    ``_mock_openai.chat.completions.create`` (an ``AsyncMock``) to return
+    specific responses — setting ``return_value`` is enough because
+    ``AsyncMock`` returns it from the awaitable.
+
+    The FastAPI client and retriever are injected via the ``get_client`` /
+    ``get_retriever`` Depends providers rather than by patching a global;
+    tests override them using ``app.dependency_overrides``.
     """
     mock_openai = MagicMock()
+    # The production code uses ``await client.chat.completions.create(...)``
+    # and ``await client.embeddings.create(...)`` — those must return
+    # awaitables, so we upgrade just those methods to ``AsyncMock`` (the
+    # rest of the client can stay a plain ``MagicMock``).
+    mock_openai.chat.completions.create = AsyncMock()
+    mock_openai.embeddings.create = AsyncMock()
 
-    with (
-        patch("chatbot.api.main._get_client", return_value=mock_openai),
-        patch("chatbot.api.main.get_knowledge_base", return_value=mock_kb),
-        patch("chatbot.api.main._get_retriever", return_value=mock_retriever),
-    ):
-        from chatbot.api.main import app
+    from chatbot.api.main import app, get_client, get_retriever
+
+    app.dependency_overrides[get_client] = lambda: mock_openai
+    app.dependency_overrides[get_retriever] = lambda: mock_retriever
+
+    with patch("chatbot.api.main.get_knowledge_base", return_value=mock_kb):
         client = TestClient(app, raise_server_exceptions=False)
         # Attach the mocks so individual tests can configure them.
         client._mock_openai = mock_openai
         client._mock_retriever = mock_retriever
-        yield client
+        try:
+            yield client
+        finally:
+            app.dependency_overrides.clear()
 
 
 # ── Convenience: pre-canned LLM responses ─────────────────────────────────────

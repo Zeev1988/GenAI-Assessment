@@ -33,6 +33,9 @@ Design notes
   startup the retriever logs a warning and ``is_ready()`` returns False;
   callers fall back to stuffing the full knowledge base into the prompt
   (see ``Retriever.fallback_chunks`` and ``api/main.py:_handle_qa``).
+
+* **Fully async.**  Indexing and search use ``AsyncAzureOpenAI`` so the
+  FastAPI event loop is never blocked while waiting on the embedding API.
 """
 
 from __future__ import annotations
@@ -42,7 +45,7 @@ import re
 from dataclasses import dataclass
 
 from bs4 import BeautifulSoup, Tag
-from openai import APIError, AzureOpenAI
+from openai import APIError, AsyncAzureOpenAI
 
 from common import get_logger
 
@@ -212,7 +215,7 @@ class Retriever:
 
     def __init__(
         self,
-        client: AzureOpenAI,
+        client: AsyncAzureOpenAI,
         embedding_deployment: str,
     ) -> None:
         self._client = client
@@ -223,7 +226,7 @@ class Retriever:
 
     # ── Indexing ──────────────────────────────────────────────────────────
 
-    def index(self, chunks: list[Chunk]) -> None:
+    async def index(self, chunks: list[Chunk]) -> None:
         """Embed every chunk and store the vectors in memory."""
         if not chunks:
             logger.warning("Retriever.index() called with zero chunks")
@@ -236,7 +239,7 @@ class Retriever:
             self._deployment,
         )
         try:
-            response = self._client.embeddings.create(
+            response = await self._client.embeddings.create(
                 model=self._deployment,
                 input=inputs,
             )
@@ -271,7 +274,7 @@ class Retriever:
 
     # ── Retrieval ─────────────────────────────────────────────────────────
 
-    def search(self, query: str, k: int) -> list[tuple[Chunk, float]]:
+    async def search(self, query: str, k: int) -> list[tuple[Chunk, float]]:
         """Return the top-k most similar chunks to *query*.
 
         Returns an empty list if the index is not ready or *query* is empty.
@@ -286,7 +289,7 @@ class Retriever:
             return []
 
         try:
-            resp = self._client.embeddings.create(
+            resp = await self._client.embeddings.create(
                 model=self._deployment,
                 input=[q],
             )

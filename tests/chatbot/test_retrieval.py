@@ -10,8 +10,10 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock
+from typing import Any, Awaitable, TypeVar
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from openai import APIError
@@ -26,16 +28,29 @@ from chatbot.core.retrieval import (
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+T = TypeVar("T")
+
+
+def _run(coro: Awaitable[T]) -> T:
+    """Run an awaitable from a sync test.
+
+    Avoids adding a ``pytest-asyncio`` dependency for the handful of async
+    methods on ``Retriever`` — the test suite stays sync across the board.
+    """
+    return asyncio.run(coro)
+
+
 def _make_embedding_client(vectors: list[list[float]]) -> MagicMock:
-    """Return a mock Azure OpenAI client whose embeddings.create() yields *vectors*.
+    """Return a mock AsyncAzureOpenAI client whose embeddings.create() yields *vectors*.
 
     The mock is deliberately batch-agnostic: each call returns the pre-canned
-    vectors in the same order they were supplied.
+    vectors in the same order they were supplied.  ``embeddings.create`` is
+    an ``AsyncMock`` since the production code awaits it.
     """
     client = MagicMock()
     calls: list[list[float]] = []
 
-    def side_effect(model: str, input):
+    def side_effect(model: str, input: Any):
         n = len(input)
         # Return the first n vectors we haven't yet returned.
         start = len(calls)
@@ -52,7 +67,9 @@ def _make_embedding_client(vectors: list[list[float]]) -> MagicMock:
         resp.data = [MagicMock(embedding=vec) for vec in batch]
         return resp
 
-    client.embeddings.create.side_effect = side_effect
+    # AsyncMock accepts a *sync* side_effect: the return value becomes the
+    # coroutine's result when awaited.
+    client.embeddings.create = AsyncMock(side_effect=side_effect)
     return client
 
 
@@ -175,7 +192,7 @@ class TestRetrieverIndex:
         chunks = _chunks_for("foo", "bar")
         client = _make_embedding_client([[1.0, 0.0], [0.0, 1.0]])
         retriever = Retriever(client, embedding_deployment="ada")
-        retriever.index(chunks)
+        _run(retriever.index(chunks))
 
         assert retriever.is_ready()
         assert retriever.chunk_count() == 2
@@ -184,7 +201,7 @@ class TestRetrieverIndex:
         chunks = _chunks_for("a", "b", "c")
         client = _make_embedding_client([[1.0], [1.0], [1.0]])
         retriever = Retriever(client, embedding_deployment="ada")
-        retriever.index(chunks)
+        _run(retriever.index(chunks))
 
         # The embedder should be called exactly once — a single batch.
         assert client.embeddings.create.call_count == 1
@@ -194,16 +211,17 @@ class TestRetrieverIndex:
 
     def test_empty_chunk_list_is_a_noop(self):
         client = MagicMock()
+        client.embeddings.create = AsyncMock()
         retriever = Retriever(client, embedding_deployment="ada")
-        retriever.index([])
+        _run(retriever.index([]))
         assert not retriever.is_ready()
         client.embeddings.create.assert_not_called()
 
     def test_api_error_during_indexing_leaves_retriever_not_ready(self):
         client = MagicMock()
-        client.embeddings.create.side_effect = _make_api_error()
+        client.embeddings.create = AsyncMock(side_effect=_make_api_error())
         retriever = Retriever(client, embedding_deployment="ada")
-        retriever.index(_chunks_for("foo"))
+        _run(retriever.index(_chunks_for("foo")))
         assert not retriever.is_ready()
 
 
@@ -218,9 +236,9 @@ class TestRetrieverSearch:
              [1.0, 0.0, 0.0]]   # query embedding — pointing at "dental"
         )
         retriever = Retriever(client, embedding_deployment="ada")
-        retriever.index(chunks)
+        _run(retriever.index(chunks))
 
-        results = retriever.search("teeth cleaning", k=3)
+        results = _run(retriever.search("teeth cleaning", k=3))
         assert len(results) == 3
         assert results[0][0].text == "dental"
         assert results[0][1] == pytest.approx(1.0)
@@ -235,8 +253,8 @@ class TestRetrieverSearch:
              [0.9, 0.1, 0.05, 0.01]]
         )
         retriever = Retriever(client, embedding_deployment="ada")
-        retriever.index(chunks)
-        results = retriever.search("q", k=2)
+        _run(retriever.index(chunks))
+        results = _run(retriever.search("q", k=2))
         assert len(results) == 2
 
     def test_k_larger_than_corpus_returns_all(self):
@@ -245,33 +263,35 @@ class TestRetrieverSearch:
             [[1, 0], [0, 1], [0.5, 0.5]]
         )
         retriever = Retriever(client, embedding_deployment="ada")
-        retriever.index(chunks)
-        results = retriever.search("q", k=50)
+        _run(retriever.index(chunks))
+        results = _run(retriever.search("q", k=50))
         assert len(results) == 2
 
     def test_empty_query_returns_no_results(self):
         chunks = _chunks_for("a")
         client = _make_embedding_client([[1.0]])
         retriever = Retriever(client, embedding_deployment="ada")
-        retriever.index(chunks)
+        _run(retriever.index(chunks))
         # Only the index call should consume embeddings — searches with
         # an empty query must short-circuit before hitting the API.
-        assert retriever.search("", k=5) == []
-        assert retriever.search("   ", k=5) == []
+        assert _run(retriever.search("", k=5)) == []
+        assert _run(retriever.search("   ", k=5)) == []
         assert client.embeddings.create.call_count == 1
 
     def test_not_ready_retriever_returns_empty(self):
-        retriever = Retriever(MagicMock(), embedding_deployment="ada")
-        assert retriever.search("anything", k=3) == []
+        client = MagicMock()
+        client.embeddings.create = AsyncMock()
+        retriever = Retriever(client, embedding_deployment="ada")
+        assert _run(retriever.search("anything", k=3)) == []
 
     def test_api_error_during_search_returns_empty(self):
         chunks = _chunks_for("a", "b")
         client = _make_embedding_client([[1, 0], [0, 1]])
         retriever = Retriever(client, embedding_deployment="ada")
-        retriever.index(chunks)
+        _run(retriever.index(chunks))
         # Now make subsequent calls fail.
         client.embeddings.create.side_effect = _make_api_error()
-        assert retriever.search("q", k=2) == []
+        assert _run(retriever.search("q", k=2)) == []
 
 
 # ── Integration with the real HTML knowledge base ─────────────────────────────

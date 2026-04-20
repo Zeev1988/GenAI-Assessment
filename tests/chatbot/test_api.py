@@ -54,13 +54,13 @@ def qa_payload(messages, user_info):
 USER_MESSAGE = [{"role": "user", "content": "שלום, אני רוצה לרשום"}]
 ASSISTANT_MESSAGE = [{"role": "assistant", "content": "ברוך הבא!"}]
 
-# A collection-phase history where the user has just confirmed the summary.
-# Used by the transition tests because the API now requires an affirmative
-# user turn before accepting a submit_user_info tool call.
-CONFIRMED_COLLECTION_HISTORY = [
+# A collection-phase history up to the point where the confirm dialog has
+# been rendered.  Transition tests also pass ``user_confirmed=True`` — the
+# API only accepts ``submit_user_info`` when the UI relays an explicit
+# confirmation click.
+POST_CONFIRMATION_HISTORY = [
     {"role": "user", "content": "שלום, אני רוצה לרשום"},
     {"role": "assistant", "content": "בבקשה אשר/י שהפרטים נכונים."},
-    {"role": "user", "content": "כן, הכול נכון"},
 ]
 
 
@@ -178,21 +178,24 @@ class TestPhaseTransition:
     def test_transition_flag_is_true(self, api_client, transition_reply):
         api_client._mock_openai.chat.completions.create.return_value = transition_reply
         body = api_client.post(
-            "/api/v1/chat", json=collection_payload(CONFIRMED_COLLECTION_HISTORY)
+            "/api/v1/chat",
+            json=collection_payload(POST_CONFIRMATION_HISTORY, user_confirmed=True),
         ).json()
         assert body["transition"] is True
 
     def test_phase_switches_to_qa(self, api_client, transition_reply):
         api_client._mock_openai.chat.completions.create.return_value = transition_reply
         body = api_client.post(
-            "/api/v1/chat", json=collection_payload(CONFIRMED_COLLECTION_HISTORY)
+            "/api/v1/chat",
+            json=collection_payload(POST_CONFIRMATION_HISTORY, user_confirmed=True),
         ).json()
         assert body["phase"] == "qa"
 
     def test_extracted_user_info_populated(self, api_client, transition_reply, sample_user_info):
         api_client._mock_openai.chat.completions.create.return_value = transition_reply
         body = api_client.post(
-            "/api/v1/chat", json=collection_payload(CONFIRMED_COLLECTION_HISTORY)
+            "/api/v1/chat",
+            json=collection_payload(POST_CONFIRMATION_HISTORY, user_confirmed=True),
         ).json()
         info = body["extracted_user_info"]
         assert info is not None
@@ -203,7 +206,8 @@ class TestPhaseTransition:
     def test_all_user_info_fields_present(self, api_client, transition_reply):
         api_client._mock_openai.chat.completions.create.return_value = transition_reply
         body = api_client.post(
-            "/api/v1/chat", json=collection_payload(CONFIRMED_COLLECTION_HISTORY)
+            "/api/v1/chat",
+            json=collection_payload(POST_CONFIRMATION_HISTORY, user_confirmed=True),
         ).json()
         info = body["extracted_user_info"]
         required_fields = {
@@ -218,7 +222,8 @@ class TestPhaseTransition:
         reply = make_llm_response(None, tool_call=tc)  # content=None
         api_client._mock_openai.chat.completions.create.return_value = reply
         body = api_client.post(
-            "/api/v1/chat", json=collection_payload(CONFIRMED_COLLECTION_HISTORY)
+            "/api/v1/chat",
+            json=collection_payload(POST_CONFIRMATION_HISTORY, user_confirmed=True),
         ).json()
         assert body["transition"] is True
         assert len(body["message"]) > 0   # fallback text was generated
@@ -229,24 +234,30 @@ class TestPhaseTransition:
         tc.function.arguments = "{not valid json"   # malformed JSON
         reply = make_llm_response("אישור", tool_call=tc)
         api_client._mock_openai.chat.completions.create.return_value = reply
+        # JSON-parse failure is raised before the gate is consulted, so
+        # ``user_confirmed`` is irrelevant here — the response must be a 500
+        # either way.
         resp = api_client.post(
-            "/api/v1/chat", json=collection_payload(CONFIRMED_COLLECTION_HISTORY)
+            "/api/v1/chat",
+            json=collection_payload(POST_CONFIRMATION_HISTORY, user_confirmed=True),
         )
         assert resp.status_code == 500
 
 
 class TestConfirmationGate:
-    """The submit_user_info tool call must be gated on an affirmative user turn.
+    """The submit_user_info tool call must be gated on the typed confirmation flag.
 
     These tests cover the eager-tool-calling failure mode: even if the LLM
-    fires the tool, the API must refuse to transition until the user has
-    actually confirmed in the messages array.
+    fires the tool, the API must refuse to transition until the UI relays
+    an explicit ``user_confirmed=True`` on the payload.  Free-text
+    confirmations in the messages array are no longer accepted — the gate
+    is intentionally deterministic and requires a real UI action.
     """
 
     def test_eager_tool_call_without_confirmation_does_not_transition(
         self, api_client, transition_reply
     ):
-        # User's last message is a normal greeting, not a confirmation.
+        # No user_confirmed flag → no transition, regardless of message text.
         api_client._mock_openai.chat.completions.create.return_value = transition_reply
         body = api_client.post(
             "/api/v1/chat", json=collection_payload(USER_MESSAGE)
@@ -255,31 +266,25 @@ class TestConfirmationGate:
         assert body["phase"] == "collection"
         assert body["extracted_user_info"] is None
 
-    def test_negation_in_user_turn_blocks_transition(
+    def test_affirmative_text_alone_does_not_open_gate(
         self, api_client, transition_reply
     ):
+        """Historical regression guard: before the typed-flag-only design,
+        the backend used to sniff for "yes"/"כן" in the user turn.  It
+        must no longer do so — an unambiguous text confirmation without the
+        typed flag must still be refused."""
         history = [
             {"role": "user", "content": "שלום"},
             {"role": "assistant", "content": "אנא אשר/י"},
-            {"role": "user", "content": "לא נכון, יש טעות בגיל"},
+            {"role": "user", "content": "כן, הכול נכון"},
         ]
         api_client._mock_openai.chat.completions.create.return_value = transition_reply
-        body = api_client.post("/api/v1/chat", json=collection_payload(history)).json()
+        body = api_client.post(
+            "/api/v1/chat", json=collection_payload(history)  # user_confirmed omitted
+        ).json()
         assert body["transition"] is False
         assert body["phase"] == "collection"
-
-    def test_english_confirmation_accepted(
-        self, api_client, transition_reply
-    ):
-        history = [
-            {"role": "user", "content": "Hello"},
-            {"role": "assistant", "content": "Please confirm"},
-            {"role": "user", "content": "yes, that's right"},
-        ]
-        api_client._mock_openai.chat.completions.create.return_value = transition_reply
-        body = api_client.post("/api/v1/chat", json=collection_payload(history)).json()
-        assert body["transition"] is True
-        assert body["phase"] == "qa"
+        assert body["confirmation_pending"] is True
 
     def test_eager_tool_call_surfaces_pending_user_info(
         self, api_client, transition_reply, sample_user_info
@@ -360,7 +365,8 @@ class TestTypedConfirmationFlag:
             "/api/v1/chat",
             json=collection_payload(USER_MESSAGE),  # no user_confirmed sent
         ).json()
-        # USER_MESSAGE is just a greeting — text fallback won't open the gate either.
+        # The typed flag is the only confirmation channel, so its absence
+        # must block the gate.
         assert body["transition"] is False
 
 
