@@ -19,12 +19,25 @@ _KNOWLEDGE_BASE_DEFAULT = PROJECT_ROOT / "tests" / "test_data" / "phase2_data"
 
 
 class ChatBotSettings(AzureOpenAISettings):
-    # Longer timeout than Part 1 because the full knowledge base is passed
-    # on every Q&A turn (the LLM's prompt can be 20k+ tokens).
+    # Longer timeout than Part 1 because the Q&A prompt may carry several
+    # retrieved chunks plus conversation history.
     request_timeout_s: float = Field(default=90.0)
 
     # ── Knowledge base ─────────────────────────────────────────────────────────
     knowledge_base_path: Path = Field(default=_KNOWLEDGE_BASE_DEFAULT)
+
+    # ── Retrieval (ADA-002) ────────────────────────────────────────────────────
+    # Name of the Azure OpenAI *embedding* deployment (separate from the chat
+    # deployment).  Matches the resource provided with the assignment.
+    azure_openai_embedding_deployment: str = Field(default="text-embedding-ada-002")
+    # When True the Q&A handler embeds the user's question, retrieves the
+    # top-k most relevant chunks, and passes only those to GPT-4o.
+    # Set to False to fall back to stuffing the full knowledge base into the
+    # prompt (useful for A/B comparisons or when the embedding deployment is
+    # unavailable).
+    use_retrieval: bool = Field(default=True)
+    # How many chunks to retrieve per Q&A turn.
+    retrieval_top_k: int = Field(default=5)
 
     # ── API server ─────────────────────────────────────────────────────────────
     api_host: str = Field(default="0.0.0.0")
