@@ -39,8 +39,9 @@ st.caption(
 # under `tests/test_data/phase1_data/`.
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SAMPLE_DIRS = (
-    _PROJECT_ROOT / "phase1_data",
-    _PROJECT_ROOT / "tests" / "test_data" / "phase1_data",
+    _PROJECT_ROOT / "test_data",
+    _PROJECT_ROOT / "tests" / "test_data" / "test_data",
+    _PROJECT_ROOT / "tests" / "test_data",
 )
 
 
