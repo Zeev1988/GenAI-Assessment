@@ -21,7 +21,7 @@ dist/
 .idea/
 .vscode/
 .DS_Store
-
+.cache/
 # OCR cache — generated on first integration run
 tests/fixtures/ocr_cache/*.txt
 
