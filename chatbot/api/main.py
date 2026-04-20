@@ -27,7 +27,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from openai import AzureOpenAI, APIError, APITimeoutError, APIConnectionError
+from openai import APIConnectionError, APIError, APITimeoutError, AzureOpenAI
 from pydantic import BaseModel, Field, field_validator
 
 from common import get_logger

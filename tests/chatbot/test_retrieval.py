@@ -16,13 +16,13 @@ from unittest.mock import MagicMock
 import pytest
 from openai import APIError
 
+from chatbot.core.knowledge import TOPIC_TITLES
 from chatbot.core.retrieval import (
     Chunk,
     Retriever,
     _cosine,
     chunk_html_document,
 )
-from chatbot.core.knowledge import TOPIC_TITLES
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

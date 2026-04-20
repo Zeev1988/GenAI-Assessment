@@ -12,8 +12,8 @@ from __future__ import annotations
 import pytest
 
 from chatbot.core.prompts import (
-    SUBMIT_USER_INFO_TOOL,
     COLLECTION_SYSTEM_PROMPT,
+    SUBMIT_USER_INFO_TOOL,
     build_qa_system_prompt,
 )
 
