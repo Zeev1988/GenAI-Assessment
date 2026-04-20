@@ -126,16 +126,16 @@ def _check_anchor_disagreement(
     leave the JSON alone; the reviewer decides which value is right.
     """
     issues: list[Issue] = []
-    for field in warn_only_fields():
-        parsed = parse_numeric(ocr_text, field)
+    for f in warn_only_fields():
+        parsed = parse_numeric(ocr_text, f)
         if parsed is None:
             continue
-        if field in _ADDRESS_FIELDS:
-            llm_value = getattr(form.address, field, "")
-            path = f"address.{field}"
+        if f in _ADDRESS_FIELDS:
+            llm_value = getattr(form.address, f, "")
+            path = f"address.{f}"
         else:
-            llm_value = getattr(form, field, "")
-            path = field
+            llm_value = getattr(form, f, "")
+            path = f
         if not llm_value:
             # Parser read something, LLM left it empty — worth flagging
             # so the reviewer can look, but without asserting the read
