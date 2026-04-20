@@ -1,4 +1,4 @@
-# 📄 Form 283 Extractor
+# Form 283 Extractor
 
 **Part 1 of the GenAI take-home:** A pipeline that extracts Bituach Leumi Form 283 (PDF/JPG/PNG) into strictly typed, validated JSON.
 
