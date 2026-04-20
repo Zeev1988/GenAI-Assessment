@@ -14,6 +14,7 @@ You almost always want to run `api` and `ui` in two separate terminals.
 
 import subprocess
 import sys
+import time
 
 
 def run_api() -> None:
@@ -53,6 +54,7 @@ if __name__ == "__main__":
         import threading
         t = threading.Thread(target=run_api, daemon=True)
         t.start()
+        time.sleep(3)
         run_ui()  # blocks in the main thread
     else:
         usage()
