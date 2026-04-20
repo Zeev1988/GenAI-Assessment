@@ -94,9 +94,6 @@ class ExtractedForm(_Model):
     accidentAddress: str = Field(default="")
     accidentDescription: str = Field(default="")
     injuredBodyPart: str = Field(default="")
-    # signature: retained for schema parity with the assignment spec but
-    # never populated — handwritten signatures aren't reliably OCR'd and the
-    # applicant's printed name is already captured via firstName + lastName.
     signature: str = Field(default="")
     formFillingDate: DatePart = Field(default_factory=DatePart)
     formReceiptDateAtClinic: DatePart = Field(default_factory=DatePart)
