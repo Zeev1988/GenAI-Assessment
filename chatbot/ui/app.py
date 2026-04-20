@@ -73,6 +73,7 @@ def _init_state() -> None:
         "user_info": None,       # dict | None
         "session_id": str(uuid.uuid4()),
         "greeted": False,        # True once the opening LLM greeting has been fetched
+        "pending_confirmation": None,  # dict | None
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -88,12 +89,22 @@ def _reset() -> None:
 
 # ── API client ─────────────────────────────────────────────────────────────────
 
-def _call_api(extra_user_message: str | None = None) -> dict:
+def _call_api(
+    extra_user_message: str | None = None,
+    *,
+    user_confirmed: bool = False,
+    confirmed_data: dict | None = None,
+) -> dict:
     """POST to /api/v1/chat and return the JSON response dict.
 
     If *extra_user_message* is provided it is appended to the payload messages
     (used for the initial greeting trigger where we don't want to show the
     hidden message in the UI).
+
+    *user_confirmed* / *confirmed_data* carry the typed-confirmation channel.
+    Set them only in response to an explicit user action (clicking the
+    "Confirm" button on the pending-info dialog).  The backend prefers this
+    over classifying the latest user turn as an affirmative phrase.
 
     Returns ``{"error": "<reason>"}`` on any failure so the caller can display
     a user-friendly error without crashing.
@@ -105,12 +116,16 @@ def _call_api(extra_user_message: str | None = None) -> dict:
     if extra_user_message is not None:
         messages_payload.append({"role": "user", "content": extra_user_message})
 
-    payload = {
+    payload: dict = {
         "phase": st.session_state.phase,
         "messages": messages_payload,
         "user_info": st.session_state.user_info,
         "request_id": str(uuid.uuid4()),
     }
+    if user_confirmed:
+        payload["user_confirmed"] = True
+        if confirmed_data is not None:
+            payload["confirmed_data"] = confirmed_data
 
     try:
         resp = requests.post(
@@ -153,6 +168,8 @@ def _apply_api_response(api_resp: dict) -> bool:
 
     assistant_msg: str = api_resp.get("message", "")
     transition: bool = api_resp.get("transition", False)
+    confirmation_pending: bool = api_resp.get("confirmation_pending", False)
+    pending_user_info = api_resp.get("pending_user_info")
 
     if transition:
         # Collection complete → switch to Q&A with a fresh message history.
@@ -161,9 +178,15 @@ def _apply_api_response(api_resp: dict) -> bool:
         st.session_state.messages = [
             {"role": "assistant", "content": assistant_msg}
         ]
+        st.session_state.pending_confirmation = None
     else:
         st.session_state.messages.append(
             {"role": "assistant", "content": assistant_msg}
+        )
+        # Stash the pending snapshot when the backend asks for confirmation,
+        # clear it otherwise so a stale dialog can't linger across turns.
+        st.session_state.pending_confirmation = (
+            pending_user_info if confirmation_pending else None
         )
 
     return True
@@ -228,6 +251,104 @@ def _render_history() -> None:
             st.markdown(msg["content"])
 
 
+# ── Confirmation dialog ───────────────────────────────────────────────────────
+
+# Order matters — this is the sequence the dialog shows, matching the order
+# the LLM collected the fields in.  Keeping it a module-level constant makes
+# the ordering explicit rather than depending on dict-iteration quirks.
+_CONFIRMATION_FIELD_ORDER: tuple[tuple[str, str], ...] = (
+    ("first_name", "First name / שם פרטי"),
+    ("last_name", "Last name / שם משפחה"),
+    ("id_number", "ID number / ת.ז."),
+    ("gender", "Gender / מין"),
+    ("age", "Age / גיל"),
+    ("hmo_name", "HMO / קופה"),
+    ("hmo_card_number", "HMO card / מס' כרטיס"),
+    ("insurance_tier", "Tier / מסלול"),
+)
+
+
+def _format_pending_summary(pending: dict) -> str:
+    """Render the pending snapshot as a markdown key/value list."""
+    lines: list[str] = []
+    for key, label in _CONFIRMATION_FIELD_ORDER:
+        if key in pending and pending[key] not in (None, ""):
+            lines.append(f"- **{label}:** {pending[key]}")
+    # Fall back to any fields we didn't know about so the user always sees
+    # everything the backend is about to submit.
+    known = {k for k, _ in _CONFIRMATION_FIELD_ORDER}
+    for key, value in pending.items():
+        if key in known or value in (None, ""):
+            continue
+        lines.append(f"- **{key}:** {value}")
+    return "\n".join(lines)
+
+
+# Synthetic user turn recorded in the visible chat history when the user
+# clicks Confirm.  The backend decides on the typed flag, not on this text —
+# but without a user turn the transcript would have a visible gap between
+# "please confirm…" and "welcome to Q&A", which reads oddly.
+_CONFIRM_USER_MESSAGE = "✅ אישרתי את הפרטים / Confirmed"
+
+
+def _render_confirmation_dialog() -> bool:
+    """Render the Confirm / Edit dialog.  Returns True if a rerun is needed.
+
+    Called only when ``st.session_state.pending_confirmation`` is set, i.e.,
+    the backend's most recent response had ``confirmation_pending=True``.
+    Clicking Confirm relays the typed confirmation to the backend; clicking
+    Edit clears the pending snapshot and lets the user type a correction in
+    the normal chat input.
+    """
+    pending = st.session_state.pending_confirmation
+    if not pending:
+        return False
+
+    with st.container(border=True):
+        st.markdown("**Please confirm your details / בבקשה אשר/י את הפרטים:**")
+        summary = _format_pending_summary(pending)
+        if summary:
+            st.markdown(summary)
+
+        col_confirm, col_edit = st.columns(2)
+        confirm_clicked = col_confirm.button(
+            "Confirm / אישור",
+            type="primary",
+            use_container_width=True,
+            key="confirm_pending_btn",
+        )
+        edit_clicked = col_edit.button(
+            "Edit / תיקון",
+            use_container_width=True,
+            key="edit_pending_btn",
+        )
+
+    if confirm_clicked:
+        # Snapshot the pending data before we clear it — the backend uses
+        # this to cross-check against the LLM's submit_user_info arguments.
+        confirmed_data = dict(pending)
+        st.session_state.messages.append(
+            {"role": "user", "content": _CONFIRM_USER_MESSAGE}
+        )
+        st.session_state.pending_confirmation = None
+        with st.spinner("Finalising / מעבד…"):
+            api_resp = _call_api(
+                user_confirmed=True,
+                confirmed_data=confirmed_data,
+            )
+        _apply_api_response(api_resp)
+        return True
+
+    if edit_clicked:
+        # Just drop the pending snapshot; the user types their correction
+        # normally in the next turn and the LLM will call
+        # request_user_confirmation again with the updated data.
+        st.session_state.pending_confirmation = None
+        return True
+
+    return False
+
+
 # ── Main app ───────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -249,6 +370,16 @@ def main() -> None:
         st.rerun()
 
     _render_history()
+
+    # ── Confirmation dialog (only in collection phase, when the backend
+    #    signalled confirmation_pending=True on the last response) ────────────
+    if (
+        st.session_state.phase == "collection"
+        and st.session_state.pending_confirmation
+    ):
+        if _render_confirmation_dialog():
+            st.rerun()
+        return
 
     # ── Chat input ─────────────────────────────────────────────────────────────
     placeholder = (

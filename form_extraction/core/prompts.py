@@ -86,8 +86,6 @@ the fund name whose checkbox is marked — ``כללית`` / ``מכבי`` / \
 MUST NEVER populate ``healthFundMember``. ``natureOfAccident`` and \
 ``medicalDiagnoses`` are filled by the clinic after submission; on an \
 applicant-submitted page they are ``""``.
-7. ``signature`` is not OCR-readable and is always ``""``. The \
-applicant's name is already captured in ``firstName`` / ``lastName``.
 """
 
 
