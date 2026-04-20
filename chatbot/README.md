@@ -96,19 +96,6 @@ AZURE_OPENAI_DEPLOYMENT=gpt-4o
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-ada-002
 ```
 
-Optional overrides:
-
-```dotenv
-CHATBOT_API_URL=http://localhost:8000   # URL the Streamlit app uses to reach the API
-API_HOST=0.0.0.0
-API_PORT=8000
-LOG_LEVEL=INFO
-LOG_FILE=chatbot.log
-
-# How many chunks to send to GPT-4o per question (see "Retrieval layer").
-RETRIEVAL_TOP_K=5
-```
-
 ### 3 — Start the API server
 
 ```bash
