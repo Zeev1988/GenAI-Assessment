@@ -13,7 +13,7 @@ Uploads a Bituach Leumi Form 283 (PDF/JPG/PNG), runs Azure Document Intelligence
 **Stack:** Azure Document Intelligence · Azure OpenAI GPT-4o · Pydantic · Streamlit
 
 ```bash
-streamlit run form_extraction/ui/app.py
+python -m streamlit run form_extraction/ui/app.py
 ```
 
 → See [`form_extraction/README.md`](form_extraction/README.md) for full details.
