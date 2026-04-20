@@ -14,8 +14,8 @@ from pydantic import Field
 
 from common.config import PROJECT_ROOT, AzureOpenAISettings
 
-# Knowledge base lives at <project_root>/tests/test_data/phase2_data.
-_KNOWLEDGE_BASE_DEFAULT = PROJECT_ROOT / "tests" / "test_data" / "phase2_data"
+# Knowledge base lives at <project_root>/tests/chatbot/test_data.
+_KNOWLEDGE_BASE_DEFAULT = PROJECT_ROOT / "tests" / "chatbot" / "test_data"
 
 
 class ChatBotSettings(AzureOpenAISettings):
