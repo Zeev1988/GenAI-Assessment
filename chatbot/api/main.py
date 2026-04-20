@@ -39,6 +39,7 @@ from ..core.prompts import (
     SUBMIT_USER_INFO_TOOL,
     build_qa_system_prompt,
 )
+from ..core.retrieval import Retriever
 
 settings = get_settings()
 logger = get_logger(
@@ -104,17 +105,14 @@ class ChatResponse(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Pre-load the knowledge base before accepting requests."""
+    """Load the knowledge base and build the ADA-002 retrieval index."""
     logger.info("=== HMO Chatbot API starting up ===")
     kb = get_knowledge_base()
-    if kb.is_loaded():
-        logger.info(
-            "Knowledge base ready: %d topics loaded", kb.topic_count()
-        )
+    if not kb.is_loaded():
+        logger.error("Knowledge base NOT loaded — Q&A will not work")
     else:
-        logger.warning(
-            "Knowledge base NOT loaded — Q&A answers will be unavailable."
-        )
+        logger.info("Knowledge base ready: %d topics loaded", kb.topic_count())
+        _get_retriever().index(kb.chunks())
     yield
     logger.info("=== HMO Chatbot API shutting down ===")
 
@@ -143,6 +141,7 @@ app.add_middleware(
 # ── Azure OpenAI client ────────────────────────────────────────────────────────
 
 _client: Optional[AzureOpenAI] = None
+_retriever: Optional[Retriever] = None
 
 
 def _get_client() -> AzureOpenAI:
@@ -167,6 +166,17 @@ def _get_client() -> AzureOpenAI:
             settings.azure_openai_api_version,
         )
     return _client
+
+
+def _get_retriever() -> Retriever:
+    """Return the singleton Retriever, creating it on first call."""
+    global _retriever
+    if _retriever is None:
+        _retriever = Retriever(
+            client=_get_client(),
+            embedding_deployment=settings.azure_openai_embedding_deployment,
+        )
+    return _retriever
 
 
 # ── LLM helpers ───────────────────────────────────────────────────────────────
@@ -330,23 +340,52 @@ def _handle_qa(
     user_info: dict[str, Any],
     request_id: str,
 ) -> ChatResponse:
-    """Answer health-fund questions using the member's profile + knowledge base."""
-    kb = get_knowledge_base()
-    knowledge_content = kb.all_content()
+    """Answer health-fund questions using retrieval + the member's profile."""
+    retriever = _get_retriever()
+    if not retriever.is_ready():
+        logger.error("[%s] Retrieval index not ready", request_id)
+        raise HTTPException(
+            status_code=503,
+            detail="The retrieval index is not ready. Please try again.",
+        )
 
-    if not knowledge_content:
-        logger.warning("[%s] Knowledge base is empty — answers will be limited", request_id)
+    # The retrieval query is the most recent user turn — that's what the
+    # user actually just asked about.  Earlier turns remain in `messages`
+    # so the LLM still sees the full conversational context.
+    latest_user = next(
+        (m.content for m in reversed(messages) if m.role == "user"),
+        "",
+    )
+    results = retriever.search(latest_user, settings.retrieval_top_k)
+    if not results:
+        logger.error(
+            "[%s] Retrieval returned no results for query=%r", request_id, latest_user[:80]
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Failed to retrieve context for your question. Please try again.",
+        )
+
+    topics_hit = sorted({chunk.topic for chunk, _ in results})
+    scores_preview = ", ".join(f"{score:.3f}" for _, score in results)
+    separator = "\n" + "=" * 80 + "\n"
+    knowledge_content = separator.join(chunk.prompt_block for chunk, _ in results)
 
     system_prompt = build_qa_system_prompt(user_info, knowledge_content)
     openai_msgs = _openai_messages(system_prompt, messages)
 
     logger.info(
-        "[%s] Q&A phase — %s | HMO: %s | tier: %s | %d messages",
+        "[%s] Q&A phase — %s | HMO: %s | tier: %s | %d messages | chunks=%d/%d "
+        "| topics=%s | scores=[%s]",
         request_id,
         user_info.get("first_name"),
         user_info.get("hmo_name"),
         user_info.get("insurance_tier"),
         len(messages),
+        len(results),
+        retriever.chunk_count(),
+        topics_hit,
+        scores_preview,
     )
 
     response = _call_llm(openai_msgs, request_id)
@@ -364,14 +403,21 @@ def _handle_qa(
 
 @app.get("/health", summary="Health check")
 async def health_check():
-    """Returns service status and knowledge-base readiness."""
+    """Returns service status, knowledge-base readiness, and retriever status."""
     kb = get_knowledge_base()
+    retriever = _get_retriever()
     return {
         "status": "ok",
         "knowledge_base_loaded": kb.is_loaded(),
         "topic_count": kb.topic_count(),
         "topics": kb.topic_titles(),
         "deployment": settings.azure_openai_deployment,
+        "retrieval": {
+            "ready": retriever.is_ready(),
+            "indexed_chunks": retriever.chunk_count(),
+            "top_k": settings.retrieval_top_k,
+            "embedding_deployment": settings.azure_openai_embedding_deployment,
+        },
     }
 
 

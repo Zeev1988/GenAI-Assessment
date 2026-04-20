@@ -3,8 +3,11 @@ Unit tests for chatbot/core/knowledge.py
 
 Tests are grouped by concern:
   - Loading behaviour (happy path, missing path, partial failures)
-  - Content retrieval (all_content format, topic metadata)
+  - Topic metadata + chunk production
   - Singleton factory
+
+The chunker itself is covered in tests/chatbot/test_retrieval.py; here we
+only verify that the KnowledgeBase wires it up with the right topic titles.
 """
 
 from __future__ import annotations
@@ -61,7 +64,7 @@ class TestLoading:
     def test_content_contains_hebrew(self, test_data_path):
         """Sanity-check that the Hebrew text was read correctly (UTF-8)."""
         kb = fresh_kb(test_data_path)
-        combined = kb.all_content()
+        combined = " ".join(c.text for c in kb.chunks())
         # Every file mentions at least one HMO name.
         assert "מכבי" in combined
         assert "מאוחדת" in combined
@@ -69,7 +72,7 @@ class TestLoading:
 
     def test_content_contains_all_tiers(self, test_data_path):
         kb = fresh_kb(test_data_path)
-        combined = kb.all_content()
+        combined = " ".join(c.text for c in kb.chunks())
         assert "זהב" in combined
         assert "כסף" in combined
         assert "ארד" in combined
@@ -113,25 +116,9 @@ class TestLoadingFailures:
         assert "bad" not in kb._content
 
 
-# ── Content retrieval ──────────────────────────────────────────────────────────
+# ── Topic metadata + chunks ────────────────────────────────────────────────────
 
-class TestContentRetrieval:
-    def test_all_content_contains_topic_headings(self, test_data_path):
-        kb = fresh_kb(test_data_path)
-        content = kb.all_content()
-        # Each topic is introduced with "### TOPIC: <title>"
-        for stem in kb._content:
-            title = TOPIC_TITLES.get(stem, stem)
-            assert f"### TOPIC: {title}" in content, (
-                f"Expected heading for topic '{stem}' in all_content()"
-            )
-
-    def test_all_content_separates_topics(self, test_data_path):
-        kb = fresh_kb(test_data_path)
-        content = kb.all_content()
-        # Topics are separated by a line of '=' characters.
-        assert "=" * 40 in content
-
+class TestTopicsAndChunks:
     def test_topic_titles_length_matches_topic_count(self, test_data_path):
         kb = fresh_kb(test_data_path)
         assert len(kb.topic_titles()) == kb.topic_count()
@@ -145,9 +132,14 @@ class TestContentRetrieval:
         assert TOPIC_TITLES["dentel_services"] == "מרפאות שיניים / Dental Services"
         assert TOPIC_TITLES["optometry_services"] == "אופטומטריה / Optometry"
 
-    def test_all_content_empty_when_not_loaded(self):
+    def test_chunks_cover_every_topic(self, test_data_path):
+        kb = fresh_kb(test_data_path)
+        topics_in_chunks = {c.topic for c in kb.chunks()}
+        assert topics_in_chunks == set(kb.topic_titles())
+
+    def test_chunks_empty_when_not_loaded(self):
         kb = KnowledgeBase()
-        assert kb.all_content() == ""
+        assert kb.chunks() == []
 
 
 # ── Singleton factory ──────────────────────────────────────────────────────────

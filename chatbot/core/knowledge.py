@@ -1,9 +1,8 @@
 """Knowledge-base loader for Israeli health-fund service data.
 
 HTML files (one per service category) are loaded once at startup and
-exposed as raw HTML for direct consumption by GPT-4o, which understands
-HTML structure natively.  No pre-parsing is done so no structural
-information is lost.
+exposed as :class:`~chatbot.core.retrieval.Chunk` objects ready to be
+indexed by the ADA-002 retriever.
 """
 
 from __future__ import annotations
@@ -12,6 +11,8 @@ from pathlib import Path
 from typing import Optional
 
 from common import get_logger
+
+from .retrieval import Chunk, chunk_html_document
 
 logger = get_logger(__name__)
 
@@ -66,26 +67,24 @@ class KnowledgeBase:
     def is_loaded(self) -> bool:
         return self._loaded
 
-    # ── Retrieval ──────────────────────────────────────────────────────────────
-
-    def all_content(self) -> str:
-        """Return the complete knowledge base as a formatted string.
-
-        Each topic is introduced with a clear heading so the LLM can
-        orient itself.  The raw HTML is preserved for structural fidelity.
-        """
-        separator = "\n" + "=" * 80 + "\n"
-        parts: list[str] = []
-        for stem, html in self._content.items():
-            title = TOPIC_TITLES.get(stem, stem)
-            parts.append(f"### TOPIC: {title}\n\n{html}")
-        return separator.join(parts)
-
     def topic_titles(self) -> list[str]:
         return [TOPIC_TITLES.get(s, s) for s in self._content]
 
     def topic_count(self) -> int:
         return len(self._content)
+
+    def chunks(self) -> list[Chunk]:
+        """Return the full corpus split into retrieval-ready chunks.
+
+        One chunk per service table row, plus one intro chunk per topic.
+        The topic title is carried on every chunk so each one is
+        self-contained when injected into the prompt.
+        """
+        out: list[Chunk] = []
+        for stem, html in self._content.items():
+            title = TOPIC_TITLES.get(stem, stem)
+            out.extend(chunk_html_document(stem, title, html))
+        return out
 
 
 # ── Module-level singleton ─────────────────────────────────────────────────────

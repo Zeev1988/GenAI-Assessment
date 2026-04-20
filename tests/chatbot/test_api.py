@@ -72,6 +72,14 @@ class TestHealth:
         body = api_client.get("/health").json()
         assert isinstance(body["topics"], list)
 
+    def test_retrieval_block_present(self, api_client):
+        body = api_client.get("/health").json()
+        assert "retrieval" in body
+        assert body["retrieval"]["ready"] is True
+        assert body["retrieval"]["indexed_chunks"] == 2
+        assert body["retrieval"]["top_k"] >= 1
+        assert body["retrieval"]["embedding_deployment"]
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Collection phase — normal dialogue turns
@@ -261,6 +269,51 @@ class TestQAPhase:
             json=qa_payload(USER_MESSAGE, sample_user_info),
         )
         api_client._mock_openai.chat.completions.create.assert_called_once()
+
+    def test_retriever_consulted_with_latest_user_message(
+        self, api_client, qa_reply, sample_user_info
+    ):
+        api_client._mock_openai.chat.completions.create.return_value = qa_reply
+        api_client.post(
+            "/api/v1/chat",
+            json=qa_payload(
+                [
+                    {"role": "user", "content": "שאלה ישנה"},
+                    {"role": "assistant", "content": "תשובה ישנה"},
+                    {"role": "user", "content": "כמה עולה בדיקת שיניים?"},
+                ],
+                sample_user_info,
+            ),
+        )
+        # The retriever should receive the most recent user message as query.
+        api_client._mock_retriever.search.assert_called_once()
+        args, kwargs = api_client._mock_retriever.search.call_args
+        assert args[0] == "כמה עולה בדיקת שיניים?"
+
+    def test_returns_503_when_retriever_not_ready(
+        self, api_client, qa_reply, sample_user_info
+    ):
+        api_client._mock_openai.chat.completions.create.return_value = qa_reply
+        api_client._mock_retriever.is_ready.return_value = False
+        resp = api_client.post(
+            "/api/v1/chat",
+            json=qa_payload(USER_MESSAGE, sample_user_info),
+        )
+        assert resp.status_code == 503
+        # LLM must not be called when retrieval is unusable.
+        api_client._mock_openai.chat.completions.create.assert_not_called()
+
+    def test_returns_502_when_retrieval_returns_nothing(
+        self, api_client, qa_reply, sample_user_info
+    ):
+        api_client._mock_openai.chat.completions.create.return_value = qa_reply
+        api_client._mock_retriever.search.return_value = []
+        resp = api_client.post(
+            "/api/v1/chat",
+            json=qa_payload(USER_MESSAGE, sample_user_info),
+        )
+        assert resp.status_code == 502
+        api_client._mock_openai.chat.completions.create.assert_not_called()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
