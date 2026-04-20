@@ -54,12 +54,10 @@ chatbot/
 │   ├── __init__.py
 │   ├── config.py        Pydantic-settings (reads project-root .env)
 │   ├── knowledge.py     HTML knowledge-base loader (singleton)
-│   ├── logger.py        Rotating-file + console logger factory
 │   └── prompts.py       System prompts + submit_user_info tool schema
 ├── ui/
 │   ├── __init__.py
 │   └── app.py           Streamlit frontend (all state in session_state)
-├── requirements.txt
 └── README.md            (this file)
 ```
 
@@ -71,11 +69,11 @@ chatbot/
 
 ```bash
 # From the project root
-pip install -r chatbot/requirements.txt
+pip install -e ".[dev]"
 ```
 
-> **Tip:** All other project dependencies are already covered by the root
-> `pyproject.toml`; the chatbot `requirements.txt` adds only the new packages.
+This installs Part 1 (`form_extraction`), Part 2 (`chatbot`), and all dev
+tools from the root `pyproject.toml`.
 
 ### 2 — Set credentials
 
@@ -216,10 +214,44 @@ Six HTML files in `tests/test_data/phase2_data/`:
 
 ---
 
+## Design choices
+
+**Why no ADA-002 embeddings / retrieval?** The knowledge base is six short
+HTML files (~20–30 KB total). The full content fits comfortably in GPT-4o's
+context window with room to spare for the system prompt, conversation
+history, and the answer. Embedding + top-k retrieval would add latency,
+operational cost, and a failure mode (irrelevant chunks leaking into the
+context) without measurably improving answer quality at this size.
+
+The decision **would flip** once the knowledge base exceeded roughly 50 KB
+or started covering substantially more topics, at which point the marginal
+cost of a larger prompt outweighs the operational simplicity.  The
+retrieval layer would then be a simple `embeddings.create()` call at
+startup to index every document, plus a cosine-similarity lookup per
+request — the rest of the pipeline would not need to change.
+
+**Why tool-calling for the phase transition?** Using `submit_user_info` as
+an OpenAI function-call lets the LLM signal "collection complete" with a
+strongly-typed payload (the tool parameters are a JSON schema with `enum`
+constraints for gender / HMO / tier). The alternative — a keyword like
+`[DONE]` in the reply text, or a separate classifier call — is both less
+reliable and not self-documenting. The schema *is* the contract.
+
+**Why pass the full conversation history on every request?** The brief
+mandates statelessness, but there's also a pragmatic reason: any
+server-side session store introduces sticky routing and a new failure mode
+for multi-instance deployments. Passing history client-side means the API
+is infinitely horizontally scalable and a Container App restart can't lose
+any user's context.
+
+---
+
 ## Logging
 
-Logs are written to both the console and `chatbot.log` (rotating, 5 MB × 3 files).
-Every request is logged with its `request_id`, phase, token usage, and response time.
+Logs go to both the console and `chatbot.log` (rotating, 5 MB × 3 files).
+Every request is logged with its `request_id`, phase, token usage, and
+response time.  The logger factory lives in the shared `common/logger.py`
+and is also used by Part 1.
 
 ---
 

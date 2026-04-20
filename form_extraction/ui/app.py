@@ -12,23 +12,19 @@ Run with:
 from __future__ import annotations
 
 import json
-import logging
 from pathlib import Path
 
 import streamlit as st
 from openai import APIConnectionError, APIStatusError, AuthenticationError, RateLimitError
 from pydantic import ValidationError
 
+from common import get_logger
 from form_extraction.core.pipeline import run
 from form_extraction.core.schemas import to_hebrew_keys
 
-# Configure logging once per process. Streamlit reruns the script but logging
-# handlers survive, so basicConfig is a no-op on subsequent runs.
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
-log = logging.getLogger("form_extraction.ui")
+# Streamlit reruns the script on every interaction, but the logger factory
+# deduplicates handlers on subsequent calls so we only configure once.
+log = get_logger("form_extraction.ui")
 
 st.set_page_config(page_title="Form 283 Extractor", layout="wide")
 st.title("Bituach Leumi – Form 283 Extractor")

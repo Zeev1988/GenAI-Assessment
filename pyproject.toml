@@ -33,7 +33,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["form_extraction*", "chatbot*"]
+include = ["common*", "form_extraction*", "chatbot*"]
 
 [tool.ruff]
 line-length = 100

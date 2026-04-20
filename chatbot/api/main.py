@@ -30,17 +30,22 @@ from fastapi.responses import JSONResponse
 from openai import AzureOpenAI, APIError, APITimeoutError, APIConnectionError
 from pydantic import BaseModel, Field, field_validator
 
+from common import get_logger
+
 from ..core.config import get_settings
 from ..core.knowledge import get_knowledge_base
-from ..core.logger import get_logger
 from ..core.prompts import (
     COLLECTION_SYSTEM_PROMPT,
     SUBMIT_USER_INFO_TOOL,
     build_qa_system_prompt,
 )
 
-logger = get_logger(__name__)
 settings = get_settings()
+logger = get_logger(
+    __name__,
+    level=settings.log_level,
+    log_file=settings.log_file,
+)
 
 
 # ── Pydantic request / response models ────────────────────────────────────────

@@ -53,13 +53,12 @@ form_extraction/
     pipeline.py      # OCR -> extract -> validate
   ui/                # Streamlit entrypoint; imports only from core
     app.py
-tests/
+tests/form_extraction/
   test_schema.py     # round-trip + json_schema strictness
   test_validate.py   # format rules, completeness, and grounding
   test_e2e.py        # parametrised E2E against the 3 known sample PDFs
                      #   (gated behind RUN_AZURE_TESTS=1; OCR results cached
-                     #    under tests/fixtures/ocr_cache/)
-  test_live.py       # gated smoke test against a real sample PDF
+                     #    under tests/form_extraction/fixtures/ocr_cache/)
 ```
 
 The public library surface is re-exported from `form_extraction/__init__.py`,
@@ -97,12 +96,13 @@ pytest -m "not integration"          # explicitly skip the gated E2E tests
 RUN_AZURE_TESTS=1 pytest             # include the live E2E tests
 ```
 
-The E2E suite (`tests/test_e2e.py`) caches Azure DI OCR output under
-`tests/fixtures/ocr_cache/<stem>.txt`.  First run requires
-`RUN_AZURE_TESTS=1` and live Azure DI + Azure OpenAI credentials; subsequent
-runs skip the Document Intelligence call and only hit Azure OpenAI.
-Sample PDFs are looked up in `tests/test_data/phase1_data/` and, as a
-fallback, in `phase1_data/` at the repo root.
+The E2E suite (`tests/form_extraction/test_e2e.py`) caches Azure DI OCR
+output under `tests/form_extraction/fixtures/ocr_cache/<stem>.txt`.  First
+run requires `RUN_AZURE_TESTS=1` and live Azure DI + Azure OpenAI
+credentials; subsequent runs skip the Document Intelligence call and only
+hit Azure OpenAI. Sample PDFs are looked up in
+`tests/form_extraction/test_data/phase1_data/` and, as a fallback, in
+`phase1_data/` at the repo root.
 
 ## Example output
 

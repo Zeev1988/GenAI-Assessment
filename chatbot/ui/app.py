@@ -13,7 +13,7 @@ Phase flow
 1. **collection** — LLM collects member info conversationally.
    When the backend signals ``transition=True`` the frontend switches to Q&A.
 2. **qa** — LLM answers health-fund questions using the member's profile.
-   Member info card is shown in the sidebar.
+   Member info is shown in the sidebar.
 
 Async note
 ----------
@@ -34,8 +34,7 @@ import streamlit as st
 
 # ── Page config — must be the very first Streamlit call ──────────────────────
 st.set_page_config(
-    page_title="HMO Chatbot | צ'אטבוט קופות חולים",
-    page_icon="🏥",
+    page_title="HMO Chatbot",
     layout="centered",
     initial_sidebar_state="expanded",
 )
@@ -44,15 +43,11 @@ st.set_page_config(
 
 API_BASE_URL: str = os.environ.get("CHATBOT_API_URL", "http://localhost:8000")
 
-TIER_ICON: dict[str, str] = {"זהב": "🥇", "כסף": "🥈", "ארד": "🥉"}
-HMO_ICON: dict[str, str] = {"מכבי": "💙", "מאוחדת": "💚", "כללית": "❤️"}
-GENDER_ICON: dict[str, str] = {"זכר": "👨", "נקבה": "👩", "אחר": "🧑"}
-
-# ── Custom CSS ─────────────────────────────────────────────────────────────────
-
+# ── CSS — the only styling we actually need is Hebrew/English direction ───────
+# Streamlit doesn't auto-detect RTL for mixed-language content, so we force
+# per-element direction based on the first strong character.
 _CSS = """
 <style>
-/* Auto-detect text direction per element (Hebrew ↔ English) */
 .stChatMessage p,
 .stChatMessage li,
 .stMarkdown p {
@@ -60,31 +55,9 @@ _CSS = """
     text-align: start;
     unicode-bidi: plaintext;
 }
-
-/* Slightly larger chat bubbles */
-div[data-testid="stChatMessageContent"] {
-    font-size: 1.02rem;
-    line-height: 1.6;
-}
-
-/* Input box auto-direction */
 .stChatInput textarea {
     direction: auto;
     unicode-bidi: plaintext;
-}
-
-/* Softer progress bar */
-div[data-testid="stProgressBar"] > div {
-    background: linear-gradient(90deg, #1a73e8 0%, #34a853 100%);
-}
-
-/* Sidebar member card */
-.member-card {
-    background: #f8f9fa;
-    border-radius: 10px;
-    padding: 12px 16px;
-    border-left: 4px solid #1a73e8;
-    margin-bottom: 8px;
 }
 </style>
 """
@@ -116,8 +89,7 @@ def _reset() -> None:
 # ── API client ─────────────────────────────────────────────────────────────────
 
 def _call_api(extra_user_message: str | None = None) -> dict:
-    """
-    POST to /api/v1/chat and return the JSON response dict.
+    """POST to /api/v1/chat and return the JSON response dict.
 
     If *extra_user_message* is provided it is appended to the payload messages
     (used for the initial greeting trigger where we don't want to show the
@@ -149,11 +121,11 @@ def _call_api(extra_user_message: str | None = None) -> dict:
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.Timeout:
-        return {"error": "⏱️ The request timed out. Please try again."}
+        return {"error": "The request timed out. Please try again."}
     except requests.exceptions.ConnectionError:
         return {
             "error": (
-                "🔌 Cannot reach the API server. "
+                "Cannot reach the API server. "
                 f"Is it running at `{API_BASE_URL}`?"
             )
         }
@@ -163,18 +135,17 @@ def _call_api(extra_user_message: str | None = None) -> dict:
             detail = exc.response.json().get("detail", "")
         except Exception:
             pass
-        return {"error": f"❌ Server error: {detail or str(exc)}"}
+        return {"error": f"Server error: {detail or str(exc)}"}
     except Exception as exc:
-        return {"error": f"❌ Unexpected error: {exc}"}
+        return {"error": f"Unexpected error: {exc}"}
 
 
 # ── Phase-transition handler ───────────────────────────────────────────────────
 
-def _apply_api_response(api_resp: dict, user_message: str | None = None) -> bool:
-    """
-    Process an API response dict, updating session state.
+def _apply_api_response(api_resp: dict) -> bool:
+    """Process an API response dict, updating session state.
 
-    Returns True if the page should be rerun, False if we already handle it.
+    Returns True if the page should be rerun.
     """
     if "error" in api_resp:
         st.error(api_resp["error"])
@@ -202,50 +173,28 @@ def _apply_api_response(api_resp: dict, user_message: str | None = None) -> bool
 
 def _render_sidebar() -> None:
     with st.sidebar:
-        st.markdown("## 🏥 HMO Chatbot")
-        st.caption("Medical Services Q&A · שירותי קופות חולים")
+        st.markdown("## HMO Chatbot")
+        st.caption("Medical services Q&A  ·  שירותי קופות חולים")
         st.divider()
 
         if st.session_state.phase == "qa" and st.session_state.user_info:
             u: dict = st.session_state.user_info
-            hmo = u.get("hmo_name", "")
-            tier = u.get("insurance_tier", "")
-            gender = u.get("gender", "")
-
-            st.markdown("### 👤 Member Profile")
+            st.markdown("**Member profile**")
             st.markdown(
-                f"<div class='member-card'>"
-                f"<b>{u.get('first_name','')} {u.get('last_name','')}</b><br>"
-                f"{HMO_ICON.get(hmo,'🏥')} <b>{hmo}</b> &nbsp;|&nbsp; "
-                f"{TIER_ICON.get(tier,'⭐')} {tier}<br>"
-                f"{GENDER_ICON.get(gender,'🧑')} {gender} &nbsp;|&nbsp; גיל {u.get('age','')}"
-                f"</div>",
-                unsafe_allow_html=True,
+                f"{u.get('first_name', '')} {u.get('last_name', '')}  \n"
+                f"HMO: **{u.get('hmo_name', '')}**  \n"
+                f"Tier: **{u.get('insurance_tier', '')}**  \n"
+                f"Age: {u.get('age', '')}  ·  Gender: {u.get('gender', '')}"
             )
-
-            st.divider()
-            st.markdown("**Available topics / נושאים זמינים:**")
-            for topic in [
-                "💊 רפואה משלימה · Alternative medicine",
-                "🦷 שיניים · Dental services",
-                "👁️ אופטומטריה · Optometry",
-                "🤰 הריון · Pregnancy",
-                "🏋️ סדנאות · Health workshops",
-                "🗣️ מרפאות תקשורת · Comm. clinics",
-            ]:
-                st.caption(topic)
             st.divider()
 
-        # Always show the reset button.
-        if st.button("🔄 Start Over / התחל מחדש", use_container_width=True):
+        if st.button("Start over / התחל מחדש", use_container_width=True):
             _reset()
             st.rerun()
 
         st.divider()
         phase_label = (
-            "📋 Registration"
-            if st.session_state.phase == "collection"
-            else "💬 Q&A"
+            "Registration" if st.session_state.phase == "collection" else "Q&A"
         )
         st.caption(f"Phase: {phase_label}")
         st.caption(f"Session: `{st.session_state.session_id[:8]}…`")
@@ -255,26 +204,18 @@ def _render_sidebar() -> None:
 
 def _render_header() -> None:
     if st.session_state.phase == "collection":
-        st.markdown("## 🏥 Health Fund Chatbot")
-        st.markdown(
-            "*שלב 1 — הרשמה | Step 1 — Registration*\n\n"
-            "The assistant will guide you through registration in a friendly conversation. "
-            "You may reply in **Hebrew or English**."
+        st.markdown("## Health Fund Chatbot")
+        st.caption(
+            "Step 1 of 2 — Registration.  "
+            "The assistant will guide you through registration in a friendly "
+            "conversation.  You may reply in Hebrew or English."
         )
-        st.progress(0.3, text="Step 1 of 2: Registration")
     else:
         u = st.session_state.user_info or {}
         hmo = u.get("hmo_name", "")
         tier = u.get("insurance_tier", "")
-        name = u.get("first_name", "")
-        st.markdown(
-            f"## {HMO_ICON.get(hmo, '🏥')} Medical Services Q&A"
-        )
-        st.markdown(
-            f"*שלום {name}! אתה במסלול {TIER_ICON.get(tier,'')} {tier} ב{hmo}. "
-            f"שאל אותי על שירותי הקופה שלך.*"
-        )
-        st.progress(1.0, text="Step 2 of 2: Q&A")
+        st.markdown("## Medical Services Q&A")
+        st.caption(f"Step 2 of 2 — Ask about your {hmo} {tier}-tier benefits.")
 
     st.divider()
 
@@ -291,20 +232,18 @@ def _render_history() -> None:
 
 def main() -> None:
     _init_state()
-
-    # Inject custom CSS.
     st.markdown(_CSS, unsafe_allow_html=True)
 
     _render_sidebar()
     _render_header()
 
     # ── Opening greeting (collection phase, first load) ────────────────────────
-    # We trigger the LLM greeting automatically so the user doesn't have to
-    # type first.  A hidden "[SESSION_START]" message is sent to the API but
-    # NOT stored in the visible message history.
+    # Trigger the LLM greeting automatically so the user doesn't have to type
+    # first.  A hidden "[SESSION_START]" is sent to the API but NOT stored in
+    # the visible history.
     if not st.session_state.greeted and st.session_state.phase == "collection":
         st.session_state.greeted = True
-        with st.spinner("Connecting… / מתחבר…"):
+        with st.spinner("Connecting…"):
             api_resp = _call_api(extra_user_message="[SESSION_START]")
         _apply_api_response(api_resp)
         st.rerun()
@@ -313,22 +252,18 @@ def main() -> None:
 
     # ── Chat input ─────────────────────────────────────────────────────────────
     placeholder = (
-        "הקלד תשובה... / Type your answer…"
+        "Type your answer… / הקלד תשובה…"
         if st.session_state.phase == "collection"
-        else "שאל שאלה... / Ask a question…"
+        else "Ask a question… / שאל שאלה…"
     )
 
     if prompt := st.chat_input(placeholder):
-        # 1. Show the user's message immediately.
         with st.chat_message("user"):
             st.markdown(prompt)
-
-        # 2. Append to history so it is included in the API payload.
         st.session_state.messages.append({"role": "user", "content": prompt})
 
-        # 3. Call the backend.
         with st.chat_message("assistant"):
-            with st.spinner("חושב... / Thinking…"):
+            with st.spinner("Thinking…"):
                 api_resp = _call_api()
 
         if "error" in api_resp:

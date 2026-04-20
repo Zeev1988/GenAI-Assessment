@@ -11,20 +11,13 @@ updates:
       azure-sdks:
         patterns:
           - "azure-*"
-      lint-and-typecheck:
+      lint-and-test:
         patterns:
           - "ruff"
-          - "mypy"
-          - "pre-commit"
+          - "pytest*"
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     labels: ["dependencies", "ci"]
-
-  - package-ecosystem: docker
-    directory: /
-    schedule:
-      interval: weekly
-    labels: ["dependencies", "docker"]
