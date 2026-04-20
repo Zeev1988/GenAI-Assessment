@@ -2,79 +2,121 @@
 
 Two distinct prompts are used:
   1. COLLECTION_SYSTEM_PROMPT  – drives the user-information gathering phase
-     via natural conversation.  The LLM calls `submit_user_info` (a tool)
-     once the user has confirmed all their details.
+     via natural conversation.  The collection phase exposes two tools:
+
+     • ``request_user_confirmation`` — called when the LLM has gathered all
+       seven fields and wants the UI to render an explicit confirm/cancel
+       dialog for the user.  The backend returns ``pending_user_info`` and
+       keeps ``phase="collection"`` so the client can show confirmation UI.
+
+     • ``submit_user_info`` — called to finalise registration *after* the
+       user has explicitly confirmed.  The backend verifies the confirmation
+       (typed flag on the request, with a legacy text-based fallback) before
+       transitioning the session to Q&A.
+
   2. build_qa_system_prompt()  – builds a personalised prompt for the Q&A
      phase, injecting the user's profile and the full knowledge base.
 """
 
 from __future__ import annotations
 
-# ── Tool schema (function-calling) ─────────────────────────────────────────────
+# ── Tool schemas (function-calling) ────────────────────────────────────────────
+
+# Shared property block so the two tools stay in lock-step.  Any edit here
+# applies to both ``request_user_confirmation`` and ``submit_user_info``.
+_USER_INFO_PROPERTIES: dict = {
+    "first_name": {
+        "type": "string",
+        "description": "User's first name (שם פרטי)",
+    },
+    "last_name": {
+        "type": "string",
+        "description": "User's last name / family name (שם משפחה)",
+    },
+    "id_number": {
+        "type": "string",
+        "description": "9-digit Israeli ID number (מספר תעודת זהות)",
+        "pattern": "^[0-9]{9}$",
+    },
+    "gender": {
+        "type": "string",
+        "enum": ["זכר", "נקבה", "אחר"],
+        "description": "Gender (מין)",
+    },
+    "age": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 120,
+        "description": "Age in years (גיל)",
+    },
+    "hmo_name": {
+        "type": "string",
+        "enum": ["מכבי", "מאוחדת", "כללית"],
+        "description": "HMO name (קופת חולים)",
+    },
+    "hmo_card_number": {
+        "type": "string",
+        "description": "9-digit HMO membership card number (מספר כרטיס קופת חולים)",
+        "pattern": "^[0-9]{9}$",
+    },
+    "insurance_tier": {
+        "type": "string",
+        "enum": ["זהב", "כסף", "ארד"],
+        "description": "Insurance membership tier (מסלול ביטוח)",
+    },
+}
+
+_USER_INFO_REQUIRED: list[str] = [
+    "first_name",
+    "last_name",
+    "id_number",
+    "gender",
+    "age",
+    "hmo_name",
+    "hmo_card_number",
+    "insurance_tier",
+]
+
+
+REQUEST_USER_CONFIRMATION_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": "request_user_confirmation",
+        "description": (
+            "Ask the user to review and explicitly confirm the seven collected "
+            "registration fields before completing the collection phase. "
+            "Call this tool AS SOON AS all seven fields have been gathered — "
+            "do NOT call submit_user_info directly. The backend will relay "
+            "the collected data to the UI, which renders a confirm/cancel "
+            "dialog. Once the user clicks 'confirm', a follow-up request will "
+            "arrive with the typed confirmation flag set, and you should then "
+            "call submit_user_info."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": _USER_INFO_PROPERTIES,
+            "required": _USER_INFO_REQUIRED,
+        },
+    },
+}
+
 
 SUBMIT_USER_INFO_TOOL: dict = {
     "type": "function",
     "function": {
         "name": "submit_user_info",
         "description": (
-            "Submit the user's confirmed registration details to complete the "
-            "information-collection phase and transition to Q&A. "
-            "Call this function ONLY after the user has explicitly confirmed "
-            "that all their information is correct."
+            "Finalise the user's registration and transition to Q&A. "
+            "Call this ONLY after the user has explicitly confirmed — "
+            "typically on the follow-up turn after request_user_confirmation, "
+            "when the request arrives with the typed confirmation flag set. "
+            "If the user corrects a field, go back to dialogue and re-invoke "
+            "request_user_confirmation before calling this tool."
         ),
         "parameters": {
             "type": "object",
-            "properties": {
-                "first_name": {
-                    "type": "string",
-                    "description": "User's first name (שם פרטי)",
-                },
-                "last_name": {
-                    "type": "string",
-                    "description": "User's last name / family name (שם משפחה)",
-                },
-                "id_number": {
-                    "type": "string",
-                    "description": "9-digit Israeli ID number (מספר תעודת זהות)",
-                    "pattern": "^[0-9]{9}$",
-                },
-                "gender": {
-                    "type": "string",
-                    "enum": ["זכר", "נקבה", "אחר"],
-                    "description": "Gender (מין)",
-                },
-                "age": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 120,
-                    "description": "Age in years (גיל)",
-                },
-                "hmo_name": {
-                    "type": "string",
-                    "enum": ["מכבי", "מאוחדת", "כללית"],
-                    "description": "HMO name (קופת חולים)",
-                },
-                "hmo_card_number": {
-                    "type": "string",
-                    "description": "9-digit HMO membership card number (מספר כרטיס קופת חולים)",
-                    "pattern": "^[0-9]{9}$",
-                },
-                "insurance_tier": {
-                    "type": "string",
-                    "enum": ["זהב", "כסף", "ארד"],
-                    "description": "Insurance membership tier (מסלול ביטוח)",
-                },
-            },
-            "required": [
-                "first_name",
-                "last_name",
-                "id_number",
-                "gender",
-                "age",
-                "hmo_name",
-                "hmo_card_number",
-                "insurance_tier",
-            ],
+            "properties": _USER_INFO_PROPERTIES,
+            "required": _USER_INFO_REQUIRED,
         },
     },
 }
@@ -121,11 +163,19 @@ CONVERSATION GUIDELINES
   - HMO name: accept natural variants (e.g., "מכבי" → מכבי, "clalit" → כללית).
   - Tier: accept "gold/silver/bronze" in English and map to זהב/כסף/ארד.
 • After collecting all seven fields, present a clear summary (name, ID, gender, \
-age, HMO, card number, tier) and ask the user to confirm or correct any detail.
-• Only after the user explicitly confirms everything is correct, call `submit_user_info` \
-with the collected values. You MAY include a brief farewell/transition sentence in \
-the same response.
-• NEVER call `submit_user_info` before the user confirms.
+age, HMO, card number, tier) in the chat AND call the \
+`request_user_confirmation` tool with the collected values. \
+This hands control to the UI, which will render an explicit confirm / cancel \
+dialog for the user — do NOT skip this step.
+• On the *next* turn, the backend will deliver the user's decision:
+  - If the user confirmed (the request carries the typed confirmation flag), \
+    call `submit_user_info` with the same values. You MAY include a brief \
+    farewell/transition sentence in the same response.
+  - If the user asked to correct something, update the affected field(s) via \
+    normal dialogue and call `request_user_confirmation` again with the \
+    updated data.
+• NEVER call `submit_user_info` before `request_user_confirmation` has been \
+acknowledged by the user.
 • NEVER hardcode a fixed sequence of questions — let the dialogue flow naturally.
 """
 

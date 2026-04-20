@@ -25,12 +25,22 @@ from tests.chatbot.conftest import _make_tool_call
 
 # ── Shared payload builders ────────────────────────────────────────────────────
 
-def collection_payload(messages=None, user_info=None):
-    return {
+def collection_payload(
+    messages=None,
+    user_info=None,
+    user_confirmed: bool = False,
+    confirmed_data=None,
+):
+    payload = {
         "phase": "collection",
         "messages": messages or [],
         "user_info": user_info,
     }
+    if user_confirmed:
+        payload["user_confirmed"] = True
+    if confirmed_data is not None:
+        payload["confirmed_data"] = confirmed_data
+    return payload
 
 
 def qa_payload(messages, user_info):
@@ -270,6 +280,148 @@ class TestConfirmationGate:
         body = api_client.post("/api/v1/chat", json=collection_payload(history)).json()
         assert body["transition"] is True
         assert body["phase"] == "qa"
+
+    def test_eager_tool_call_surfaces_pending_user_info(
+        self, api_client, transition_reply, sample_user_info
+    ):
+        """When the gate blocks, the UI still gets pending_user_info so the
+        user can click a confirm button instead of retyping 'yes'."""
+        api_client._mock_openai.chat.completions.create.return_value = transition_reply
+        body = api_client.post(
+            "/api/v1/chat", json=collection_payload(USER_MESSAGE)
+        ).json()
+        assert body["transition"] is False
+        assert body["confirmation_pending"] is True
+        assert body["pending_user_info"] is not None
+        assert body["pending_user_info"]["first_name"] == sample_user_info["first_name"]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Typed confirmation flag (preferred path)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestTypedConfirmationFlag:
+    """UI sets ``user_confirmed=True`` → we trust the action without sniffing text."""
+
+    def test_typed_flag_opens_gate_without_affirmative_text(
+        self, api_client, transition_reply
+    ):
+        # No "yes" in the last user turn — the typed flag alone should suffice.
+        history = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Please confirm"},
+        ]
+        api_client._mock_openai.chat.completions.create.return_value = transition_reply
+        body = api_client.post(
+            "/api/v1/chat",
+            json=collection_payload(history, user_confirmed=True),
+        ).json()
+        assert body["transition"] is True
+        assert body["phase"] == "qa"
+
+    def test_typed_flag_with_matching_confirmed_data_accepted(
+        self, api_client, transition_reply, sample_user_info
+    ):
+        api_client._mock_openai.chat.completions.create.return_value = transition_reply
+        body = api_client.post(
+            "/api/v1/chat",
+            json=collection_payload(
+                USER_MESSAGE,
+                user_confirmed=True,
+                confirmed_data=sample_user_info,
+            ),
+        ).json()
+        assert body["transition"] is True
+        assert body["extracted_user_info"]["first_name"] == sample_user_info["first_name"]
+
+    def test_typed_flag_with_mismatched_confirmed_data_blocks_transition(
+        self, api_client, transition_reply, sample_user_info
+    ):
+        # If the LLM swaps a field between review and submit, the gate must refuse.
+        tampered = dict(sample_user_info)
+        tampered["first_name"] = "מישהו אחר"
+        api_client._mock_openai.chat.completions.create.return_value = transition_reply
+        body = api_client.post(
+            "/api/v1/chat",
+            json=collection_payload(
+                USER_MESSAGE,
+                user_confirmed=True,
+                confirmed_data=tampered,
+            ),
+        ).json()
+        assert body["transition"] is False
+        assert body["phase"] == "collection"
+        assert body["confirmation_pending"] is True
+
+    def test_typed_flag_defaults_to_false(self, api_client, transition_reply):
+        """Omitting user_confirmed must behave exactly like user_confirmed=False."""
+        api_client._mock_openai.chat.completions.create.return_value = transition_reply
+        body = api_client.post(
+            "/api/v1/chat",
+            json=collection_payload(USER_MESSAGE),  # no user_confirmed sent
+        ).json()
+        # USER_MESSAGE is just a greeting — text fallback won't open the gate either.
+        assert body["transition"] is False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# request_user_confirmation tool
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestRequestUserConfirmation:
+    """The LLM calls request_user_confirmation to hand control to the UI's
+    confirm dialog — phase stays collection, no transition, data surfaced."""
+
+    def test_confirmation_pending_flag_set(
+        self, api_client, request_confirmation_reply
+    ):
+        api_client._mock_openai.chat.completions.create.return_value = (
+            request_confirmation_reply
+        )
+        body = api_client.post(
+            "/api/v1/chat", json=collection_payload(USER_MESSAGE)
+        ).json()
+        assert body["confirmation_pending"] is True
+
+    def test_no_phase_transition(self, api_client, request_confirmation_reply):
+        api_client._mock_openai.chat.completions.create.return_value = (
+            request_confirmation_reply
+        )
+        body = api_client.post(
+            "/api/v1/chat", json=collection_payload(USER_MESSAGE)
+        ).json()
+        assert body["phase"] == "collection"
+        assert body["transition"] is False
+        assert body["extracted_user_info"] is None
+
+    def test_pending_user_info_populated(
+        self, api_client, request_confirmation_reply, sample_user_info
+    ):
+        api_client._mock_openai.chat.completions.create.return_value = (
+            request_confirmation_reply
+        )
+        body = api_client.post(
+            "/api/v1/chat", json=collection_payload(USER_MESSAGE)
+        ).json()
+        info = body["pending_user_info"]
+        assert info is not None
+        assert info["first_name"] == sample_user_info["first_name"]
+        assert info["hmo_name"] == sample_user_info["hmo_name"]
+        assert info["insurance_tier"] == sample_user_info["insurance_tier"]
+
+    def test_malformed_arguments_returns_500(
+        self, api_client, make_llm_response
+    ):
+        tc = MagicMock()
+        tc.function.name = "request_user_confirmation"
+        tc.function.arguments = "{broken json"
+        api_client._mock_openai.chat.completions.create.return_value = (
+            make_llm_response("סיכום", tool_call=tc)
+        )
+        resp = api_client.post(
+            "/api/v1/chat", json=collection_payload(USER_MESSAGE)
+        )
+        assert resp.status_code == 500
 
 
 # ══════════════════════════════════════════════════════════════════════════════

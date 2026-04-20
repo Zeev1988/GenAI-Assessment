@@ -37,6 +37,7 @@ from ..core.config import get_settings
 from ..core.knowledge import get_knowledge_base
 from ..core.prompts import (
     COLLECTION_SYSTEM_PROMPT,
+    REQUEST_USER_CONFIRMATION_TOOL,
     SUBMIT_USER_INFO_TOOL,
     build_qa_system_prompt,
 )
@@ -73,6 +74,29 @@ class ChatRequest(BaseModel):
         default=None,
         description="Confirmed member data — required when phase='qa'.",
     )
+    # Typed confirmation channel (preferred over text sniffing).
+    #
+    # Set by the UI *only* in response to an explicit user action — e.g., the
+    # user clicking "Confirm" on the dialog the frontend rendered after the
+    # LLM called ``request_user_confirmation``.  When True, the backend will
+    # accept a subsequent ``submit_user_info`` tool call without having to
+    # classify the user's free-text reply.
+    user_confirmed: bool = Field(
+        default=False,
+        description=(
+            "True when the UI is relaying an explicit user confirmation "
+            "(e.g., a confirm-button click).  Legacy clients can omit this "
+            "and rely on the text-based fallback gate."
+        ),
+    )
+    confirmed_data: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Snapshot of the data the user just confirmed, echoed by the UI "
+            "so the server can cross-check it against the LLM's tool-call "
+            "arguments.  Ignored unless user_confirmed=True."
+        ),
+    )
     request_id: str = Field(
         default_factory=lambda: str(uuid.uuid4()),
         description="Client-generated UUID for end-to-end tracing.",
@@ -97,6 +121,22 @@ class ChatResponse(BaseModel):
     extracted_user_info: Optional[dict[str, Any]] = Field(
         default=None,
         description="Parsed member data (only set when transition=True).",
+    )
+    confirmation_pending: bool = Field(
+        default=False,
+        description=(
+            "True when the LLM has called request_user_confirmation and the "
+            "UI should render an explicit confirm/cancel dialog.  The data "
+            "to display lives in pending_user_info."
+        ),
+    )
+    pending_user_info: Optional[dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Data the user is being asked to confirm.  Set only when "
+            "confirmation_pending=True.  The UI should round-trip this back "
+            "in the confirmed_data field on the next request."
+        ),
     )
     request_id: str
     processing_time_ms: int = Field(default=0)
@@ -255,20 +295,28 @@ def _call_llm(
 # ── Confirmation-gate helpers ─────────────────────────────────────────────────
 #
 # The assignment mandates a stateless microservice — all session state lives
-# client-side.  We therefore cannot store a "user has confirmed" flag on the
-# server.  Instead, before accepting a ``submit_user_info`` tool call we
-# independently verify that the *last user turn* in the request's messages
-# array looks like an affirmative confirmation, and that the turn immediately
-# before it (from the assistant) looked like a summary / review of the data.
+# client-side.  So we can't store a "user confirmed" flag on the server.
 #
-# This catches the "eager tool calling" failure mode where the LLM summarises
-# the data and fires the tool in the same response, without waiting for the
-# user to approve.  It costs us nothing in architectural purity: the check
-# operates purely on the payload the client sends us.
+# Two confirmation channels are supported, in priority order:
+#
+#   1. Typed payload flag (preferred).  ``ChatRequest.user_confirmed=True``
+#      means the UI is relaying an explicit, unambiguous user action — e.g.
+#      a "Confirm" button click on the dialog rendered after the LLM called
+#      ``request_user_confirmation``.  No text classification is needed.
+#
+#   2. Text-based fallback (legacy).  If the UI doesn't set the typed flag
+#      (older client, or first call before the confirm dialog exists), we
+#      fall back to inspecting the latest user turn in the messages array
+#      for an affirmative phrase.  Lower precision — but a backstop so the
+#      tool-call gate never opens purely because the LLM fired the tool.
+#
+# Either way the check operates purely on the payload the client sends us,
+# so architectural statelessness is preserved.
 
-# Affirmative phrases recognised as confirmation.  We deliberately keep the
-# list short and high-precision: a false negative (user re-confirms) is
-# cheaper than a false positive (tool call fires before the user agreed).
+# Affirmative phrases recognised by the text-based fallback gate.  We
+# deliberately keep the list short and high-precision: a false negative
+# (user re-confirms) is cheaper than a false positive (tool call fires
+# before the user agreed).
 _CONFIRM_TOKENS_HE: frozenset[str] = frozenset({
     "כן", "אישור", "מאשר", "מאשרת", "נכון", "בסדר", "אוקיי", "אוקי",
     "מסכים", "מסכימה", "מאשר/ת", "הכל נכון", "הכול נכון", "ללא שינויים",
@@ -325,18 +373,79 @@ def _confirmation_present(messages: list[Message]) -> bool:
     return False
 
 
+def _parse_tool_arguments(
+    tc: Any, request_id: str, tool_label: str,
+) -> dict[str, Any]:
+    """Parse a tool call's JSON arguments, surfacing a 500 on malformed input."""
+    try:
+        return json.loads(tc.function.arguments)
+    except json.JSONDecodeError as exc:
+        logger.error(
+            "[%s] Cannot parse %s arguments: %s", request_id, tool_label, exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to parse {tool_label} arguments.",
+        )
+
+
+def _confirmation_gate_passes(
+    req_user_confirmed: bool,
+    confirmed_data: Optional[dict[str, Any]],
+    tool_args: dict[str, Any],
+    messages: list[Message],
+    request_id: str,
+) -> tuple[bool, str]:
+    """Decide whether a submit_user_info tool call should be accepted.
+
+    Returns (passed, reason).  ``reason`` is a short label used for logging
+    so we can tell at-a-glance *why* the gate opened (or didn't).
+    """
+    # 1) Typed payload flag — preferred path.  When the UI sets this, the
+    #    user just clicked a confirm button and we trust the action.  We
+    #    additionally cross-check ``confirmed_data`` (if provided) against
+    #    the tool arguments so the LLM can't quietly swap a field between
+    #    the review dialog and the final submit.
+    if req_user_confirmed:
+        if confirmed_data is not None and confirmed_data != tool_args:
+            logger.warning(
+                "[%s] user_confirmed=True but confirmed_data != tool args — "
+                "refusing submit. diff_keys=%s",
+                request_id,
+                sorted(set(confirmed_data) ^ set(tool_args))
+                or [k for k in tool_args if confirmed_data.get(k) != tool_args.get(k)],
+            )
+            return False, "data_mismatch"
+        return True, "typed_flag"
+
+    # 2) Legacy text-based fallback — only consulted when the typed flag is
+    #    absent.  Keeps the old Streamlit client working until it's upgraded
+    #    to send ``user_confirmed``.
+    if _confirmation_present(messages):
+        return True, "text_fallback"
+
+    return False, "no_confirmation"
+
+
 def _handle_collection(
     messages: list[Message],
     request_id: str,
+    user_confirmed: bool = False,
+    confirmed_data: Optional[dict[str, Any]] = None,
 ) -> ChatResponse:
     """
     Drive the information-collection phase.
 
-    The LLM is given the ``submit_user_info`` tool.  When it calls that tool
-    the collection phase is complete and we transition to Q&A — but only
-    after a server-side check that the most recent user turn is an
-    affirmative confirmation.  If the LLM fires the tool eagerly we return
-    a plain dialogue response asking the user to confirm first.
+    The LLM has two tools available:
+
+    • ``request_user_confirmation`` — the correct tool to fire once all
+      seven fields have been gathered.  The backend relays the data to the
+      UI, which shows an explicit confirm dialog; no phase transition yet.
+
+    • ``submit_user_info`` — finalises registration and transitions to Q&A.
+      Gated by the two-channel confirmation check in
+      ``_confirmation_gate_passes``: either the typed ``user_confirmed``
+      flag (preferred) or the legacy text-based fallback.
     """
     # On the very first load (empty history) inject a hidden 'start' signal
     # so the LLM produces an opening greeting without requiring user input.
@@ -348,60 +457,87 @@ def _handle_collection(
         logger.info("[%s] First load — injecting SESSION_START", request_id)
     else:
         logger.info(
-            "[%s] Collection phase — %d messages in history",
+            "[%s] Collection phase — %d messages in history, user_confirmed=%s",
             request_id,
             len(messages),
+            user_confirmed,
         )
 
     openai_msgs = _openai_messages(COLLECTION_SYSTEM_PROMPT, effective_messages)
-    response = _call_llm(openai_msgs, request_id, tools=[SUBMIT_USER_INFO_TOOL])
+    response = _call_llm(
+        openai_msgs,
+        request_id,
+        tools=[REQUEST_USER_CONFIRMATION_TOOL, SUBMIT_USER_INFO_TOOL],
+    )
 
     choice = response.choices[0]
     content: str = choice.message.content or ""
     tool_calls = choice.message.tool_calls
 
-    # ── Tool call → collection complete ───────────────────────────────────────
     if tool_calls:
         tc = tool_calls[0]
-        if tc.function.name == "submit_user_info":
-            try:
-                user_info: dict = json.loads(tc.function.arguments)
-            except json.JSONDecodeError as exc:
-                logger.error(
-                    "[%s] Cannot parse submit_user_info arguments: %s", request_id, exc
-                )
-                raise HTTPException(
-                    status_code=500,
-                    detail="Failed to parse collected user information.",
-                )
+        tool_name = tc.function.name
 
-            # ── Server-side confirmation gate ────────────────────────────────
-            # The LLM is prompted to call this tool only after the user says
-            # "yes".  Prompt discipline isn't enough on its own — eager tool
-            # calling is a well-known failure mode — so we independently
-            # verify that the latest user turn reads as a confirmation.
-            # If it doesn't, we decline the tool call and nudge the LLM back
-            # into dialogue mode.  No session state required; we inspect only
-            # the messages the client sent.
-            if not _confirmation_present(messages):
+        # ── request_user_confirmation → ask UI to render confirm dialog ──
+        if tool_name == "request_user_confirmation":
+            pending = _parse_tool_arguments(tc, request_id, "request_user_confirmation")
+            logger.info(
+                "[%s] request_user_confirmation — %s %s | HMO: %s",
+                request_id,
+                pending.get("first_name"),
+                pending.get("last_name"),
+                pending.get("hmo_name"),
+            )
+            # Use the LLM's summary text, or synthesise a minimal one.
+            reply = content or (
+                "סיכמתי את הפרטים. האם הכול נכון? לחץ/י על 'אישור' כדי להמשיך, "
+                "או 'תיקון' כדי לעדכן."
+            )
+            return ChatResponse(
+                message=reply,
+                phase="collection",
+                confirmation_pending=True,
+                pending_user_info=pending,
+                request_id=request_id,
+            )
+
+        # ── submit_user_info → gated finalisation ────────────────────────
+        if tool_name == "submit_user_info":
+            user_info = _parse_tool_arguments(tc, request_id, "submit_user_info")
+
+            passed, reason = _confirmation_gate_passes(
+                req_user_confirmed=user_confirmed,
+                confirmed_data=confirmed_data,
+                tool_args=user_info,
+                messages=messages,
+                request_id=request_id,
+            )
+            if not passed:
                 logger.warning(
-                    "[%s] submit_user_info rejected — no affirmative user turn "
-                    "detected; asking for confirmation.",
+                    "[%s] submit_user_info rejected (%s) — asking for confirmation.",
                     request_id,
+                    reason,
                 )
                 reply = content or (
                     "לפני שאני ממשיך — אשמח אם תאשר/י שכל הפרטים שסיכמתי נכונים. "
                     "אם משהו לא מדויק, אפשר לתקן עכשיו."
                 )
+                # If the LLM jumped straight to submit_user_info without
+                # going through request_user_confirmation, surface the data
+                # to the UI as a pending confirmation so the user can click
+                # a button instead of retyping "yes".
                 return ChatResponse(
                     message=reply,
                     phase="collection",
+                    confirmation_pending=True,
+                    pending_user_info=user_info,
                     request_id=request_id,
                 )
 
             logger.info(
-                "[%s] Collection complete — %s %s | HMO: %s | tier: %s",
+                "[%s] Collection complete (gate=%s) — %s %s | HMO: %s | tier: %s",
                 request_id,
+                reason,
                 user_info.get("first_name"),
                 user_info.get("last_name"),
                 user_info.get("hmo_name"),
@@ -426,6 +562,11 @@ def _handle_collection(
                 extracted_user_info=user_info,
                 request_id=request_id,
             )
+
+        # Unknown tool name — log and fall through to plain dialogue reply.
+        logger.warning(
+            "[%s] Unknown tool call from LLM: %s", request_id, tool_name,
+        )
 
     # ── Normal dialogue turn ───────────────────────────────────────────────────
     logger.info("[%s] Collection dialogue — reply: %d chars", request_id, len(content))
@@ -616,7 +757,12 @@ async def chat(req: ChatRequest):
     )
 
     if req.phase == "collection":
-        result = _handle_collection(req.messages, req.request_id)
+        result = _handle_collection(
+            req.messages,
+            req.request_id,
+            user_confirmed=req.user_confirmed,
+            confirmed_data=req.confirmed_data,
+        )
     else:
         # Q&A requires user_info to be present.
         if not req.user_info:
