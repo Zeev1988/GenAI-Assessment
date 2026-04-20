@@ -22,6 +22,8 @@ dependencies = [
   "pydantic>=2.11,<3.0",
   "pydantic-settings>=2.6,<3.0",
   "python-dotenv>=1.0,<2.0",
+  # HTML parsing (chatbot retrieval)
+  "beautifulsoup4>=4.12,<5.0",
 ]
 
 [project.optional-dependencies]

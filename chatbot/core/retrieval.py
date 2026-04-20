@@ -20,6 +20,10 @@ Design notes
   the LLM needs.  Each chunk therefore stores both a ``text`` field (used
   for the embedding) and an ``html`` field (what goes into the prompt).
 
+* **DOM-based chunking.**  The HTML is parsed with BeautifulSoup so nested
+  tables, commented-out rows, and attribute quirks don't confuse the slicer
+  the way a regex-based approach would.
+
 * **No external retrieval dependencies.**  Cosine similarity is a one-liner;
   adding faiss / chromadb / numpy would be overkill for a ~50-chunk corpus.
   The native Azure OpenAI SDK is the only network dependency, in line with
@@ -27,7 +31,8 @@ Design notes
 
 * **Graceful degradation.**  If the embedding deployment is unavailable at
   startup the retriever logs a warning and ``is_ready()`` returns False;
-  callers fall back to stuffing the full KB into the prompt.
+  callers fall back to stuffing the full knowledge base into the prompt
+  (see ``Retriever.fallback_chunks`` and ``api/main.py:_handle_qa``).
 """
 
 from __future__ import annotations
@@ -35,8 +40,8 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from html.parser import HTMLParser
 
+from bs4 import BeautifulSoup, Tag
 from openai import APIError, AzureOpenAI
 
 from common import get_logger
@@ -75,54 +80,65 @@ class Chunk:
 
 # ── HTML chunker ──────────────────────────────────────────────────────────────
 
-class _TextExtractor(HTMLParser):
-    """Strip all tags, preserve inline whitespace, collapse extra blanks."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._parts: list[str] = []
-
-    def handle_data(self, data: str) -> None:
-        self._parts.append(data)
-
-    def handle_starttag(self, tag: str, attrs) -> None:  # noqa: ANN001
-        if tag in {"br", "tr", "li", "p", "h1", "h2", "h3"}:
-            self._parts.append("\n")
-        elif tag in {"td", "th"}:
-            self._parts.append(" | ")
-
-    def get_text(self) -> str:
-        raw = "".join(self._parts)
-        # Collapse runs of spaces but keep newlines.
-        raw = re.sub(r"[ \t]+", " ", raw)
-        raw = re.sub(r"\n\s*\n+", "\n", raw)
-        return raw.strip()
+# Block-level tags that should produce a line break in the plain-text render.
+_BLOCK_TAGS: frozenset[str] = frozenset({
+    "br", "tr", "li", "p", "h1", "h2", "h3", "h4", "h5", "h6", "div",
+})
+# Cell tags separated by " | " to preserve table column boundaries.
+_CELL_TAGS: frozenset[str] = frozenset({"td", "th"})
 
 
-def _html_to_text(html: str) -> str:
-    parser = _TextExtractor()
-    parser.feed(html)
-    parser.close()
-    return parser.get_text()
+def _node_text(node: Tag | str) -> str:
+    """Render a BeautifulSoup node as clean, whitespace-normalised text.
 
+    Block-level tags inject newlines, ``<td>`` / ``<th>`` inject a pipe
+    separator so the column structure survives into the embedding input.
+    """
+    parts: list[str] = []
 
-_TR_RE = re.compile(r"<tr\b[^>]*>.*?</tr>", re.IGNORECASE | re.DOTALL)
-_H2_RE = re.compile(r"<h2\b[^>]*>(.*?)</h2>", re.IGNORECASE | re.DOTALL)
-_TABLE_RE = re.compile(r"<table\b[^>]*>.*?</table>", re.IGNORECASE | re.DOTALL)
+    def walk(el):
+        if isinstance(el, str):
+            parts.append(el)
+            return
+        if not hasattr(el, "name") or el.name is None:
+            return
+        tag = el.name.lower()
+        if tag in _BLOCK_TAGS:
+            parts.append("\n")
+        elif tag in _CELL_TAGS:
+            parts.append(" | ")
+        for child in el.children:
+            walk(child)
+
+    if isinstance(node, str):
+        parts.append(node)
+    else:
+        for child in node.children:
+            walk(child)
+
+    raw = "".join(parts)
+    raw = re.sub(r"[ \t]+", " ", raw)
+    raw = re.sub(r"\n\s*\n+", "\n", raw)
+    return raw.strip()
 
 
 def chunk_html_document(stem: str, topic_title: str, html: str) -> list[Chunk]:
     """Split a single HTML file into retrievable chunks.
 
-    The first ``<tr>`` in each table is the header row (``<th>`` cells) and
-    is skipped.  Everything outside the table becomes the "intro" chunk for
-    the topic.
+    Uses a DOM parser (BeautifulSoup) so nested tables, commented-out rows,
+    and attribute quirks don't confuse the slicer the way a regex would.
+    Every ``<tr>`` that holds ``<th>`` cells is skipped; everything outside
+    every ``<table>`` becomes the "intro" chunk for the topic.
     """
     chunks: list[Chunk] = []
+    soup = BeautifulSoup(html or "", "html.parser")
 
-    # ── Intro (everything before / around the table) ──────────────────────
-    intro_html = _TABLE_RE.sub("", html).strip()
-    intro_text = _html_to_text(intro_html)
+    # ── Intro (everything outside of tables) ──────────────────────────────
+    intro_soup = BeautifulSoup(str(soup), "html.parser")
+    for table in intro_soup.find_all("table"):
+        table.decompose()
+    intro_html = str(intro_soup).strip()
+    intro_text = _node_text(intro_soup)
     if intro_text:
         chunks.append(
             Chunk(
@@ -134,30 +150,31 @@ def chunk_html_document(stem: str, topic_title: str, html: str) -> list[Chunk]:
         )
 
     # ── One chunk per service row ────────────────────────────────────────
-    header_text = ""
-    for tr_html in _TR_RE.findall(html):
-        if "<th" in tr_html.lower():
-            # Capture the header row so its column labels (HMO names, etc.)
-            # can be prepended to every service chunk for context.
-            header_text = _html_to_text(tr_html)
-            continue
-        tr_text = _html_to_text(tr_html)
-        if not tr_text:
-            continue
-        # Merge header labels into the chunk text so retrieval sees HMO names.
-        combined_text = f"{header_text}\n{tr_text}" if header_text else tr_text
-        chunks.append(
-            Chunk(
-                topic=topic_title,
-                text=combined_text,
-                # Wrap rows in a minimal <table> so the LLM still sees the
-                # tabular structure when the chunk is injected into the prompt.
-                # Note: header_html is intentionally excluded here — its column
-                # labels are already baked into combined_text for retrieval.
-                html=f"<table>{tr_html}</table>",
-                kind="service",
+    # We collect rows per-table so a header row in one table doesn't bleed
+    # context into rows of a sibling table.
+    for table in soup.find_all("table"):
+        header_text = ""
+        for tr in table.find_all("tr"):
+            if tr.find("th") is not None:
+                # Capture the header row so its column labels (HMO names,
+                # etc.) can be prepended to every service chunk for context.
+                header_text = _node_text(tr)
+                continue
+            tr_text = _node_text(tr)
+            if not tr_text:
+                continue
+            combined_text = f"{header_text}\n{tr_text}" if header_text else tr_text
+            chunks.append(
+                Chunk(
+                    topic=topic_title,
+                    text=combined_text,
+                    # Wrap rows in a minimal <table> so the LLM still sees
+                    # the tabular structure when the chunk is injected into
+                    # the prompt on its own.
+                    html=f"<table>{tr!s}</table>",
+                    kind="service",
+                )
             )
-        )
 
     if not chunks:
         logger.warning("No chunks extracted from %s (%d chars)", stem, len(html))

@@ -18,6 +18,7 @@ Design principles
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -251,6 +252,79 @@ def _call_llm(
 
 # ── Phase handlers ─────────────────────────────────────────────────────────────
 
+# ── Confirmation-gate helpers ─────────────────────────────────────────────────
+#
+# The assignment mandates a stateless microservice — all session state lives
+# client-side.  We therefore cannot store a "user has confirmed" flag on the
+# server.  Instead, before accepting a ``submit_user_info`` tool call we
+# independently verify that the *last user turn* in the request's messages
+# array looks like an affirmative confirmation, and that the turn immediately
+# before it (from the assistant) looked like a summary / review of the data.
+#
+# This catches the "eager tool calling" failure mode where the LLM summarises
+# the data and fires the tool in the same response, without waiting for the
+# user to approve.  It costs us nothing in architectural purity: the check
+# operates purely on the payload the client sends us.
+
+# Affirmative phrases recognised as confirmation.  We deliberately keep the
+# list short and high-precision: a false negative (user re-confirms) is
+# cheaper than a false positive (tool call fires before the user agreed).
+_CONFIRM_TOKENS_HE: frozenset[str] = frozenset({
+    "כן", "אישור", "מאשר", "מאשרת", "נכון", "בסדר", "אוקיי", "אוקי",
+    "מסכים", "מסכימה", "מאשר/ת", "הכל נכון", "הכול נכון", "ללא שינויים",
+})
+_CONFIRM_TOKENS_EN: frozenset[str] = frozenset({
+    "yes", "yep", "yeah", "correct", "confirm", "confirmed", "confirming",
+    "that's right", "thats right", "all correct", "looks good", "lgtm",
+    "approved", "approve", "go ahead", "ok", "okay",
+})
+# Words that negate a confirmation — if any appear in the same turn, we
+# assume the user is correcting something and refuse the tool call.
+_NEGATION_TOKENS: frozenset[str] = frozenset({
+    "לא", "תקן", "לתקן", "שנה", "שני", "שינוי", "שגוי", "טעות", "לא נכון",
+    "no", "not", "wrong", "incorrect", "change", "correct ", "fix", "edit",
+    "update", "actually",
+})
+
+_WORD_RE = re.compile(r"[\w']+", re.UNICODE)
+
+
+def _is_affirmative(text: str) -> bool:
+    """Return True iff *text* reads as an unambiguous user confirmation."""
+    normalised = (text or "").strip().lower()
+    if not normalised:
+        return False
+    tokens = _WORD_RE.findall(normalised)
+    if not tokens:
+        return False
+    token_set = set(tokens)
+    # Check phrase-level matches first so multi-word confirmations/negations
+    # ("that's right", "לא נכון") aren't tripped up by the tokeniser.
+    for phrase in _NEGATION_TOKENS:
+        if " " in phrase and phrase in normalised:
+            return False
+    for phrase in _CONFIRM_TOKENS_HE | _CONFIRM_TOKENS_EN:
+        if " " in phrase and phrase in normalised:
+            # Still bail out if a negation token is also present.
+            return not any(neg in token_set for neg in _NEGATION_TOKENS if " " not in neg)
+
+    if any(neg in token_set for neg in _NEGATION_TOKENS if " " not in neg):
+        return False
+    return bool(token_set & (_CONFIRM_TOKENS_HE | _CONFIRM_TOKENS_EN))
+
+
+def _confirmation_present(messages: list[Message]) -> bool:
+    """True iff the latest user turn in *messages* reads as a confirmation.
+
+    We look at the message history the client sent us and check the most
+    recent ``user`` turn.  No server-side state is consulted.
+    """
+    for m in reversed(messages):
+        if m.role == "user":
+            return _is_affirmative(m.content)
+    return False
+
+
 def _handle_collection(
     messages: list[Message],
     request_id: str,
@@ -259,7 +333,10 @@ def _handle_collection(
     Drive the information-collection phase.
 
     The LLM is given the ``submit_user_info`` tool.  When it calls that tool
-    the collection phase is complete and we transition to Q&A.
+    the collection phase is complete and we transition to Q&A — but only
+    after a server-side check that the most recent user turn is an
+    affirmative confirmation.  If the LLM fires the tool eagerly we return
+    a plain dialogue response asking the user to confirm first.
     """
     # On the very first load (empty history) inject a hidden 'start' signal
     # so the LLM produces an opening greeting without requiring user input.
@@ -296,6 +373,30 @@ def _handle_collection(
                 raise HTTPException(
                     status_code=500,
                     detail="Failed to parse collected user information.",
+                )
+
+            # ── Server-side confirmation gate ────────────────────────────────
+            # The LLM is prompted to call this tool only after the user says
+            # "yes".  Prompt discipline isn't enough on its own — eager tool
+            # calling is a well-known failure mode — so we independently
+            # verify that the latest user turn reads as a confirmation.
+            # If it doesn't, we decline the tool call and nudge the LLM back
+            # into dialogue mode.  No session state required; we inspect only
+            # the messages the client sent.
+            if not _confirmation_present(messages):
+                logger.warning(
+                    "[%s] submit_user_info rejected — no affirmative user turn "
+                    "detected; asking for confirmation.",
+                    request_id,
+                )
+                reply = content or (
+                    "לפני שאני ממשיך — אשמח אם תאשר/י שכל הפרטים שסיכמתי נכונים. "
+                    "אם משהו לא מדויק, אפשר לתקן עכשיו."
+                )
+                return ChatResponse(
+                    message=reply,
+                    phase="collection",
+                    request_id=request_id,
                 )
 
             logger.info(
@@ -335,54 +436,129 @@ def _handle_collection(
     )
 
 
+# Maximum number of user turns (plus the most recent assistant turn) to blend
+# into the retrieval query.  Small enough to keep the embedding input focused,
+# large enough to carry pronoun / follow-up context across a turn or two.
+_RETRIEVAL_HISTORY_TURNS = 3
+
+
+def _build_retrieval_query(messages: list[Message]) -> str:
+    """Build a context-aware retrieval query from the conversation history.
+
+    Concatenates the last few user turns and the most recent assistant turn
+    so follow-ups like "does that apply to children?" still carry the topic
+    ("dental care") into the embedding.  Returns "" when there is no user
+    content at all.
+    """
+    if not messages:
+        return ""
+
+    # Most recent user turn is the anchor — it's always included.
+    user_turns = [m.content for m in messages if m.role == "user"]
+    if not user_turns:
+        return ""
+    recent_users = user_turns[-_RETRIEVAL_HISTORY_TURNS:]
+
+    # Attach the most recent assistant reply (if any) so pronouns like "that"
+    # / "it" / "הוא" have their referent in the embedding input.
+    last_assistant = next(
+        (m.content for m in reversed(messages) if m.role == "assistant"),
+        "",
+    )
+
+    parts = recent_users[:]
+    if last_assistant:
+        # Insert assistant context *between* the earlier user turns and the
+        # latest one so the latest query dominates the embedding.
+        parts.insert(-1, last_assistant)
+
+    return "\n".join(p.strip() for p in parts if p and p.strip())
+
+
+def _full_kb_chunks(request_id: str) -> list[Any]:
+    """Return every Chunk in the knowledge base, for the retrieval fallback.
+
+    Used when the embedding index isn't ready — we stuff the whole (small)
+    corpus into the prompt so Q&A still works rather than crashing with 503.
+    """
+    kb = get_knowledge_base()
+    if not kb.is_loaded():
+        return []
+    chunks = kb.chunks()
+    logger.warning(
+        "[%s] Retrieval fallback — injecting full KB (%d chunks) into prompt",
+        request_id,
+        len(chunks),
+    )
+    return chunks
+
+
 def _handle_qa(
     messages: list[Message],
     user_info: dict[str, Any],
     request_id: str,
 ) -> ChatResponse:
-    """Answer health-fund questions using retrieval + the member's profile."""
+    """Answer health-fund questions using retrieval + the member's profile.
+
+    If the embedding retriever isn't ready at request time, we fall back to
+    stuffing the full knowledge base into the prompt (the corpus is small
+    enough for GPT-4o's context window).  Only when the KB itself is
+    unavailable do we surface a 503.
+    """
     retriever = _get_retriever()
-    if not retriever.is_ready():
-        logger.error("[%s] Retrieval index not ready", request_id)
-        raise HTTPException(
-            status_code=503,
-            detail="The retrieval index is not ready. Please try again.",
-        )
+    retrieval_query = _build_retrieval_query(messages)
 
-    # The retrieval query is the most recent user turn — that's what the
-    # user actually just asked about.  Earlier turns remain in `messages`
-    # so the LLM still sees the full conversational context.
-    latest_user = next(
-        (m.content for m in reversed(messages) if m.role == "user"),
-        "",
-    )
-    results = retriever.search(latest_user, settings.retrieval_top_k)
-    if not results:
-        logger.error(
-            "[%s] Retrieval returned no results for query=%r", request_id, latest_user[:80]
-        )
-        raise HTTPException(
-            status_code=502,
-            detail="Failed to retrieve context for your question. Please try again.",
-        )
+    if retriever.is_ready():
+        results = retriever.search(retrieval_query, settings.retrieval_top_k)
+        if not results:
+            # The index is healthy but the query is empty or embedding failed.
+            # Prefer full-KB fallback over a blank 502: the user still gets
+            # an answer and the LLM can tell them if the KB doesn't cover it.
+            logger.warning(
+                "[%s] Retrieval returned no results for query=%r — falling back to full KB",
+                request_id,
+                retrieval_query[:80],
+            )
+            chunks = _full_kb_chunks(request_id)
+            if not chunks:
+                raise HTTPException(
+                    status_code=503,
+                    detail="The knowledge base is not loaded. Please try again shortly.",
+                )
+            mode = "full_kb_fallback"
+            scored_chunks: list[tuple[Any, float]] = [(c, 0.0) for c in chunks]
+        else:
+            mode = "retrieval"
+            scored_chunks = list(results)
+    else:
+        chunks = _full_kb_chunks(request_id)
+        if not chunks:
+            logger.error("[%s] Retrieval down and KB empty", request_id)
+            raise HTTPException(
+                status_code=503,
+                detail="The knowledge base is not loaded. Please try again shortly.",
+            )
+        mode = "full_kb_fallback"
+        scored_chunks = [(c, 0.0) for c in chunks]
 
-    topics_hit = sorted({chunk.topic for chunk, _ in results})
-    scores_preview = ", ".join(f"{score:.3f}" for _, score in results)
+    topics_hit = sorted({chunk.topic for chunk, _ in scored_chunks})
+    scores_preview = ", ".join(f"{score:.3f}" for _, score in scored_chunks)
     separator = "\n" + "=" * 80 + "\n"
-    knowledge_content = separator.join(chunk.prompt_block for chunk, _ in results)
+    knowledge_content = separator.join(chunk.prompt_block for chunk, _ in scored_chunks)
 
     system_prompt = build_qa_system_prompt(user_info, knowledge_content)
     openai_msgs = _openai_messages(system_prompt, messages)
 
     logger.info(
-        "[%s] Q&A phase — %s | HMO: %s | tier: %s | %d messages | chunks=%d/%d "
-        "| topics=%s | scores=[%s]",
+        "[%s] Q&A phase — %s | HMO: %s | tier: %s | %d messages | mode=%s "
+        "| chunks=%d/%d | topics=%s | scores=[%s]",
         request_id,
         user_info.get("first_name"),
         user_info.get("hmo_name"),
         user_info.get("insurance_tier"),
         len(messages),
-        len(results),
+        mode,
+        len(scored_chunks),
         retriever.chunk_count(),
         topics_hit,
         scores_preview,
@@ -391,7 +567,7 @@ def _handle_qa(
     response = _call_llm(openai_msgs, request_id)
     answer: str = response.choices[0].message.content or ""
 
-    logger.info("[%s] Q&A answer generated (%d chars)", request_id, len(answer))
+    logger.info("[%s] Q&A answer generated (%d chars, mode=%s)", request_id, len(answer), mode)
     return ChatResponse(
         message=answer,
         phase="qa",

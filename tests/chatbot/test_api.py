@@ -44,6 +44,15 @@ def qa_payload(messages, user_info):
 USER_MESSAGE = [{"role": "user", "content": "שלום, אני רוצה לרשום"}]
 ASSISTANT_MESSAGE = [{"role": "assistant", "content": "ברוך הבא!"}]
 
+# A collection-phase history where the user has just confirmed the summary.
+# Used by the transition tests because the API now requires an affirmative
+# user turn before accepting a submit_user_info tool call.
+CONFIRMED_COLLECTION_HISTORY = [
+    {"role": "user", "content": "שלום, אני רוצה לרשום"},
+    {"role": "assistant", "content": "בבקשה אשר/י שהפרטים נכונים."},
+    {"role": "user", "content": "כן, הכול נכון"},
+]
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # GET /health
@@ -159,21 +168,21 @@ class TestPhaseTransition:
     def test_transition_flag_is_true(self, api_client, transition_reply):
         api_client._mock_openai.chat.completions.create.return_value = transition_reply
         body = api_client.post(
-            "/api/v1/chat", json=collection_payload(USER_MESSAGE)
+            "/api/v1/chat", json=collection_payload(CONFIRMED_COLLECTION_HISTORY)
         ).json()
         assert body["transition"] is True
 
     def test_phase_switches_to_qa(self, api_client, transition_reply):
         api_client._mock_openai.chat.completions.create.return_value = transition_reply
         body = api_client.post(
-            "/api/v1/chat", json=collection_payload(USER_MESSAGE)
+            "/api/v1/chat", json=collection_payload(CONFIRMED_COLLECTION_HISTORY)
         ).json()
         assert body["phase"] == "qa"
 
     def test_extracted_user_info_populated(self, api_client, transition_reply, sample_user_info):
         api_client._mock_openai.chat.completions.create.return_value = transition_reply
         body = api_client.post(
-            "/api/v1/chat", json=collection_payload(USER_MESSAGE)
+            "/api/v1/chat", json=collection_payload(CONFIRMED_COLLECTION_HISTORY)
         ).json()
         info = body["extracted_user_info"]
         assert info is not None
@@ -184,7 +193,7 @@ class TestPhaseTransition:
     def test_all_user_info_fields_present(self, api_client, transition_reply):
         api_client._mock_openai.chat.completions.create.return_value = transition_reply
         body = api_client.post(
-            "/api/v1/chat", json=collection_payload(USER_MESSAGE)
+            "/api/v1/chat", json=collection_payload(CONFIRMED_COLLECTION_HISTORY)
         ).json()
         info = body["extracted_user_info"]
         required_fields = {
@@ -199,7 +208,7 @@ class TestPhaseTransition:
         reply = make_llm_response(None, tool_call=tc)  # content=None
         api_client._mock_openai.chat.completions.create.return_value = reply
         body = api_client.post(
-            "/api/v1/chat", json=collection_payload(USER_MESSAGE)
+            "/api/v1/chat", json=collection_payload(CONFIRMED_COLLECTION_HISTORY)
         ).json()
         assert body["transition"] is True
         assert len(body["message"]) > 0   # fallback text was generated
@@ -210,8 +219,57 @@ class TestPhaseTransition:
         tc.function.arguments = "{not valid json"   # malformed JSON
         reply = make_llm_response("אישור", tool_call=tc)
         api_client._mock_openai.chat.completions.create.return_value = reply
-        resp = api_client.post("/api/v1/chat", json=collection_payload(USER_MESSAGE))
+        resp = api_client.post(
+            "/api/v1/chat", json=collection_payload(CONFIRMED_COLLECTION_HISTORY)
+        )
         assert resp.status_code == 500
+
+
+class TestConfirmationGate:
+    """The submit_user_info tool call must be gated on an affirmative user turn.
+
+    These tests cover the eager-tool-calling failure mode: even if the LLM
+    fires the tool, the API must refuse to transition until the user has
+    actually confirmed in the messages array.
+    """
+
+    def test_eager_tool_call_without_confirmation_does_not_transition(
+        self, api_client, transition_reply
+    ):
+        # User's last message is a normal greeting, not a confirmation.
+        api_client._mock_openai.chat.completions.create.return_value = transition_reply
+        body = api_client.post(
+            "/api/v1/chat", json=collection_payload(USER_MESSAGE)
+        ).json()
+        assert body["transition"] is False
+        assert body["phase"] == "collection"
+        assert body["extracted_user_info"] is None
+
+    def test_negation_in_user_turn_blocks_transition(
+        self, api_client, transition_reply
+    ):
+        history = [
+            {"role": "user", "content": "שלום"},
+            {"role": "assistant", "content": "אנא אשר/י"},
+            {"role": "user", "content": "לא נכון, יש טעות בגיל"},
+        ]
+        api_client._mock_openai.chat.completions.create.return_value = transition_reply
+        body = api_client.post("/api/v1/chat", json=collection_payload(history)).json()
+        assert body["transition"] is False
+        assert body["phase"] == "collection"
+
+    def test_english_confirmation_accepted(
+        self, api_client, transition_reply
+    ):
+        history = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Please confirm"},
+            {"role": "user", "content": "yes, that's right"},
+        ]
+        api_client._mock_openai.chat.completions.create.return_value = transition_reply
+        body = api_client.post("/api/v1/chat", json=collection_payload(history)).json()
+        assert body["transition"] is True
+        assert body["phase"] == "qa"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -269,7 +327,7 @@ class TestQAPhase:
         )
         api_client._mock_openai.chat.completions.create.assert_called_once()
 
-    def test_retriever_consulted_with_latest_user_message(
+    def test_retriever_query_carries_conversation_context(
         self, api_client, qa_reply, sample_user_info
     ):
         api_client._mock_openai.chat.completions.create.return_value = qa_reply
@@ -277,42 +335,48 @@ class TestQAPhase:
             "/api/v1/chat",
             json=qa_payload(
                 [
-                    {"role": "user", "content": "שאלה ישנה"},
-                    {"role": "assistant", "content": "תשובה ישנה"},
-                    {"role": "user", "content": "כמה עולה בדיקת שיניים?"},
+                    {"role": "user", "content": "מה הכיסוי לטיפולי שיניים?"},
+                    {"role": "assistant", "content": "יש בדיקות חינם פעמיים בשנה."},
+                    {"role": "user", "content": "האם זה חל גם על הילדים שלי?"},
                 ],
                 sample_user_info,
             ),
         )
-        # The retriever should receive the most recent user message as query.
+        # The retriever query should contain BOTH the latest user message
+        # AND the prior context so follow-up pronouns still retrieve
+        # relevant chunks (conversation-aware retrieval).
         api_client._mock_retriever.search.assert_called_once()
-        args, kwargs = api_client._mock_retriever.search.call_args
-        assert args[0] == "כמה עולה בדיקת שיניים?"
+        args, _ = api_client._mock_retriever.search.call_args
+        query = args[0]
+        assert "האם זה חל גם על הילדים שלי?" in query
+        assert "טיפולי שיניים" in query or "בדיקות חינם" in query
 
-    def test_returns_503_when_retriever_not_ready(
+    def test_falls_back_to_full_kb_when_retriever_not_ready(
         self, api_client, qa_reply, sample_user_info
     ):
+        """Retriever down → we should still answer, using the full KB."""
         api_client._mock_openai.chat.completions.create.return_value = qa_reply
         api_client._mock_retriever.is_ready.return_value = False
         resp = api_client.post(
             "/api/v1/chat",
             json=qa_payload(USER_MESSAGE, sample_user_info),
         )
-        assert resp.status_code == 503
-        # LLM must not be called when retrieval is unusable.
-        api_client._mock_openai.chat.completions.create.assert_not_called()
+        assert resp.status_code == 200
+        # The LLM must still be called — the whole KB is now the context.
+        api_client._mock_openai.chat.completions.create.assert_called_once()
 
-    def test_returns_502_when_retrieval_returns_nothing(
+    def test_falls_back_to_full_kb_when_retrieval_returns_nothing(
         self, api_client, qa_reply, sample_user_info
     ):
+        """Embedding call returned nothing → fall back rather than fail."""
         api_client._mock_openai.chat.completions.create.return_value = qa_reply
         api_client._mock_retriever.search.return_value = []
         resp = api_client.post(
             "/api/v1/chat",
             json=qa_payload(USER_MESSAGE, sample_user_info),
         )
-        assert resp.status_code == 502
-        api_client._mock_openai.chat.completions.create.assert_not_called()
+        assert resp.status_code == 200
+        api_client._mock_openai.chat.completions.create.assert_called_once()
 
 
 # ══════════════════════════════════════════════════════════════════════════════

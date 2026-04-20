@@ -220,9 +220,9 @@ def _extract_date_field(page, region: tuple[float, float, float, float]) -> str:
     parsed = _parse_ddmmyyyy(digits)
     if parsed:
         return parsed
-    # If we have at least 8 digits but _parse_ddmmyyyy couldn't validate the
-    # calendar date, return the raw first 8 digits so the LLM still sees
-    # something (and the validator will flag the bad calendar date).
+    # No unambiguous valid 8-digit window was found.  If we have at least
+    # 8 digits, surface the raw first 8 so the validator can flag the bad
+    # calendar date; the LLM sees the issue rather than a silent fabrication.
     return digits[:8] if len(digits) >= 8 else ""
 
 
@@ -295,7 +295,7 @@ def _extract_coordinate_fields(result) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Date parsing (with 9-digit recovery)
+# Date parsing (sliding-window, ambiguity-safe)
 # ---------------------------------------------------------------------------
 
 def _is_valid_date(day: int, month: int, year: int) -> bool:
@@ -303,32 +303,48 @@ def _is_valid_date(day: int, month: int, year: int) -> bool:
 
 
 def _parse_ddmmyyyy(digits: str) -> str:
-    """Try each 8-digit window of *digits* as DDMMYYYY.
+    """Return an unambiguous DDMMYYYY calendar date from *digits*, else "".
 
-    If the sequence has exactly 9 digits and no 8-digit window is a valid
-    calendar date, try dropping one digit at each of the 9 positions — this
-    recovers from the occasional Azure DI hiccup that inserts an extra digit
-    inside a digit-box row.
+    Tries every contiguous 8-digit window (so a 9-digit string is handled by
+    trimming a single digit off either end).  If exactly one window parses as
+    a valid calendar date we return it; if **multiple** windows parse we log
+    a warning and return "" — ambiguous OCR reads must never be silently
+    disambiguated by guesswork.
+
+    Design note
+    -----------
+    A previous implementation also tried dropping a digit at every interior
+    position of a 9-digit string.  That was dangerous on medical / insurance
+    data: e.g. ``"120520023"`` had two disjoint valid windows (12/05/2002 and
+    12/05/2023) and the first-match-wins heuristic would pick one without
+    flagging the ambiguity.  Interior-drop recovery has been removed; the
+    validator now surfaces these cases for human review.
     """
     if len(digits) < 8:
         return ""
 
+    candidates: list[str] = []
+    seen: set[str] = set()
     for i in range(len(digits) - 7):
         w = digits[i: i + 8]
+        if w in seen:
+            continue
+        seen.add(w)
         try:
             if _is_valid_date(int(w[:2]), int(w[2:4]), int(w[4:])):
-                return w
+                candidates.append(w)
         except ValueError:
             continue
 
-    if len(digits) == 9:
-        for skip in range(9):
-            w = digits[:skip] + digits[skip + 1:]
-            try:
-                if _is_valid_date(int(w[:2]), int(w[2:4]), int(w[4:])):
-                    return w
-            except ValueError:
-                continue
+    if len(candidates) == 1:
+        return candidates[0]
+
+    if len(candidates) > 1:
+        log.warning(
+            "ocr.date.ambiguous digits=%s candidates=%s — refusing to guess",
+            digits,
+            candidates,
+        )
 
     return ""
 
