@@ -31,7 +31,7 @@ A stateless FastAPI chatbot that answers questions about Israeli health-fund (ק
 python -m chatbot.api.main
 
 # Terminal 2 — UI
-streamlit run chatbot/ui/app.py
+python -m streamlit run chatbot/ui/app.py
 ```
 
 → See [`chatbot/README.md`](chatbot/README.md) for full details.
