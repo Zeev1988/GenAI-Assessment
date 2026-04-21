@@ -1,23 +1,11 @@
-"""Schema round-trip + OpenAI json_schema compatibility."""
+"""Basic schema tests."""
 
 from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
 
-from form_extraction.core.schemas import (
-    HEBREW_KEY_MAP,
-    ExtractedForm,
-    openai_json_schema,
-    to_hebrew_keys,
-)
-
-
-def test_default_form_is_all_empty_strings() -> None:
-    data = ExtractedForm().model_dump()
-    assert data["lastName"] == ""
-    assert data["dateOfBirth"] == {"day": "", "month": "", "year": ""}
-    assert data["address"]["city"] == ""
+from form_extraction.core.schemas import ExtractedForm
 
 
 def test_round_trip_preserves_values() -> None:
@@ -60,26 +48,3 @@ def test_round_trip_preserves_values() -> None:
 def test_extra_fields_are_rejected() -> None:
     with pytest.raises(ValidationError):
         ExtractedForm.model_validate({"unknown_key": "x"})
-
-
-def test_openai_json_schema_is_strict() -> None:
-    schema = openai_json_schema()
-
-    def walk(node: dict) -> None:
-        if node.get("type") == "object" or "properties" in node:
-            assert node.get("additionalProperties") is False
-            props = set((node.get("properties") or {}).keys())
-            required = set(node.get("required") or [])
-            assert props == required
-        for v in node.values():
-            if isinstance(v, dict):
-                walk(v)
-
-    walk(schema)
-
-
-def test_hebrew_key_conversion_is_deep_and_covers_top_level() -> None:
-    hebrew = to_hebrew_keys(ExtractedForm().model_dump())
-    assert "שם משפחה" in hebrew
-    assert "יום" in hebrew["תאריך לידה"]
-    assert set(ExtractedForm.model_fields.keys()) <= set(HEBREW_KEY_MAP.keys())

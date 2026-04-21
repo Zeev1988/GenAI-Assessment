@@ -59,14 +59,6 @@ def _make_usage(prompt: int = 100, completion: int = 50) -> MagicMock:
     return usage
 
 
-def _make_tool_call(user_info: dict, name: str = "submit_user_info") -> MagicMock:
-    """Build a mock tool_call object for submit_user_info or request_user_confirmation."""
-    tc = MagicMock()
-    tc.function.name = name
-    tc.function.arguments = json.dumps(user_info)
-    return tc
-
-
 def _build_response(
     content: str | None,
     tool_call: MagicMock | None = None,
@@ -194,15 +186,6 @@ def transition_reply(make_llm_response, sample_user_info):
     """A response where the LLM fires submit_user_info → triggers phase transition."""
     tc = _make_tool_call(sample_user_info)
     return make_llm_response("תודה! כל הפרטים נשמרו.", tool_call=tc)
-
-
-@pytest.fixture
-def request_confirmation_reply(make_llm_response, sample_user_info):
-    """A response where the LLM fires request_user_confirmation (pre-transition)."""
-    tc = _make_tool_call(sample_user_info, name="request_user_confirmation")
-    return make_llm_response(
-        "סיכמתי את הפרטים — אנא אשר/י שהם נכונים.", tool_call=tc,
-    )
 
 
 @pytest.fixture
