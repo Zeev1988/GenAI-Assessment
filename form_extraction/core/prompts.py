@@ -1,21 +1,4 @@
-"""Prompt + one worked example for Form 283 extraction.
-
-Everything the LLM sees lives here. The design is deliberately small:
-
-* A principled ``SYSTEM_PROMPT`` that describes the form, the OCR
-  rendering, and a short set of reasoning rules that apply uniformly
-  to every field — rather than enumerating per-field heuristics.
-* A single, clean few-shot that anchors the OCR → JSON mapping for
-  the shapes that are hard to convey in prose: checkbox glyphs,
-  DDMMYYYY date parts, the address table, and the empty-string
-  convention for unfilled fields.
-* :func:`build_messages` — assembles the system, few-shot, and real
-  user turns into the chat-completions payload.
-
-The structural contract (field names, enum values, "" defaults) is
-carried by ``response_format=json_schema`` in strict mode; the prompt
-does not restate it.
-"""
+"""System prompt and few-shot for Form 283 extraction."""
 
 from __future__ import annotations
 
@@ -40,59 +23,39 @@ Hebrew, laid out right-to-left.
 Input
 -----
 The user turn contains Azure Document Intelligence's Markdown rendering \
-of a scanned form. Reading order is already handled. Selection marks \
-appear inline as ``☒`` (checked) and ``☐`` (empty). Date boxes render as \
-spaced digit runs, e.g. ``0 3 0 4 2 0 2 4``. Tables render with ``|`` \
-cells. Illegible or unfilled fields appear as blank cells or missing \
-content.
+of a scanned form. Selection marks appear as ``☒`` (checked) / ``☐`` \
+(empty). Date boxes render as spaced digit runs, e.g. ``0 3 0 4 2 0 2 4``.
 
 Output
 ------
-A single JSON object matching the provided schema. Every property is \
-required; use ``""`` for any value that is not clearly filled on the \
-form. Dates are split into ``{{"day": "DD", "month": "MM", "year": \
-"YYYY"}}``. The schema is enforced by the API; do not restate it, do \
-not wrap the output in Markdown fences, do not add commentary.
+A single JSON object matching the provided schema. Use ``""`` for any \
+value that is not clearly filled. Dates split into ``{{"day": "DD", \
+"month": "MM", "year": "YYYY"}}``.
 
 Rules
 -----
-1. Copy verbatim. Preserve Hebrew characters exactly; do not translate, \
-transliterate, summarise, or reformat. Digit fields are a single \
-continuous string with no spaces or separators.
-2. Empty stays empty. If a field is blank, illegible, or you cannot \
-confidently resolve it, emit ``""``. Never guess and never copy from an \
-adjacent field. A predictable empty is better than a silent wrong.
-3. Selection marks. ``☒`` selects the label spatially adjacent to it \
-(same cell, same line, or the immediately adjacent non-empty line). \
-``☐`` means unselected and never contributes a value. If a ``☒`` has \
-no clear single adjacent label — e.g. it sits between two candidate \
-labels with equal claim, or the candidate labels are separated from it \
-by a heading or other content — treat it as unresolvable and emit \
-``""``. Enum values must come from the allowed sets (``gender`` ∈ \
-{_GENDER_LIST}; ``accidentLocation`` ∈ {_LOCATION_LIST}; \
-``medicalInstitutionFields.healthFundMember`` ∈ {_FUND_LIST}) or \
-``""``.
-4. Dates (DDMMYYYY). Split into ``day`` / ``month`` / ``year`` (zero-\
-padded). All three parts or none — if any part is missing or \
-illegible, emit all three as ``""``.
-5. Address. The row is either a street address (``street``, \
-``houseNumber``, optional ``entrance``/``apartment``, ``city``, \
-``postalCode``) or a PO Box (``poBox``). Fill the path that is present; \
-leave the other path's fields as ``""``.
+1. Copy verbatim. Preserve Hebrew exactly; do not translate or reformat. \
+Digit fields have no spaces or separators.
+2. Empty stays empty. If a field is blank or illegible, emit ``""``. Do \
+not guess or copy from adjacent fields.
+3. Selection marks. ``☒`` selects the label adjacent to it. Enum values \
+must come from the allowed sets (``gender`` ∈ {_GENDER_LIST}; \
+``accidentLocation`` ∈ {_LOCATION_LIST}; \
+``medicalInstitutionFields.healthFundMember`` ∈ {_FUND_LIST}) or ``""``.
+4. Dates (DDMMYYYY). Split into ``day``/``month``/``year`` (zero-padded). \
+All three parts or all three ``""``.
+5. Address. Either a street address (``street``, ``houseNumber``, \
+optional ``entrance``/``apartment``, ``city``, ``postalCode``) or a PO \
+Box (``poBox``). Leave the unused path empty.
 6. Section 5 is the medical-institution block. ``healthFundMember`` is \
-the fund name whose checkbox is marked — ``כללית`` / ``מכבי`` / \
-``מאוחדת`` / ``לאומית``. The separate "הנפגע חבר בקופת חולים" / \
-"הנפגע אינו חבר בקופת חולים" row is a membership-status indicator and \
-MUST NEVER populate ``healthFundMember``. ``natureOfAccident`` and \
-``medicalDiagnoses`` are filled by the clinic after submission; on an \
-applicant-submitted page they are ``""``.
+the fund name whose checkbox is marked. The separate \
+"הנפגע חבר/אינו חבר" row is a membership indicator and MUST NEVER \
+populate ``healthFundMember``. ``natureOfAccident`` and \
+``medicalDiagnoses`` are filled by the clinic; on an applicant-submitted \
+page they are ``""``.
 """
 
 
-# A single, normally-filled form. Clean glyphs, clean dates, one marked
-# checkbox per enum, a street address (PO-Box path left empty). No
-# edge cases — the goal is to anchor the OCR→JSON mapping, not to
-# demonstrate recovery from degraded OCR.
 FEW_SHOT_OCR = """\
 המוסד לביטוח לאומי
 
@@ -212,13 +175,6 @@ FEW_SHOT_JSON = {
 
 
 def build_messages(markdown: str) -> list[dict[str, str]]:
-    """Return the full chat-completions messages list for one extraction call.
-
-    Order: system → few-shot user (markdown) → few-shot assistant (JSON) →
-    real user turn. Structural constraints (field names, enum values,
-    empty-string defaults) are carried by ``response_format=json_schema``
-    in strict mode; the prompt does not restate them.
-    """
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": FEW_SHOT_OCR},

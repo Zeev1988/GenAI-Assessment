@@ -1,8 +1,4 @@
-"""Runtime configuration for the form-extraction pipeline.
-
-Extends the shared `AzureOpenAISettings` with Document Intelligence
-credentials; everything else (Azure OpenAI + env-file loading) is inherited.
-"""
+"""Form-extraction settings — extends the shared AzureOpenAISettings."""
 
 from __future__ import annotations
 

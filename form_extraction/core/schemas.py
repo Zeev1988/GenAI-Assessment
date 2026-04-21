@@ -1,12 +1,8 @@
-"""Pydantic models matching the exact JSON shape required by the assignment.
+"""Pydantic models for Form 283. camelCase keys match the assignment spec.
 
-Field names are camelCase on purpose — the assignment specifies the JSON keys.
-Every field defaults to "" so missing values are represented as empty strings.
-
-This module is the single source of truth for the three checkbox enums
-(gender, health fund, accident location). The extractor prompt and the tests
-import the label tuples from here so the prompt's allowed-value lists, the
-JSON schema's ``enum`` arrays, and the test assertions can never drift apart.
+`schemas.py` is the single source of truth for the three checkbox enums
+(gender, health fund, accident location). The extractor prompt and tests
+import the label tuples so allowed values cannot drift apart.
 """
 
 from __future__ import annotations
@@ -15,21 +11,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-# ---------------------------------------------------------------------------
-# Checkbox label tuples — single source of truth.
-#
-# The non-empty entries in each tuple correspond one-to-one to the labelled
-# checkboxes actually printed on Form 283. The extractor prompt builds its
-# allowed-value list from the same tuples, and the OpenAI ``json_schema`` we
-# send in structured-outputs mode turns them into the ``enum`` constraint,
-# so the LLM physically cannot return a fund / gender / location outside
-# this set.
-# ---------------------------------------------------------------------------
-
 GENDER_LABELS: tuple[str, ...] = ("זכר", "נקבה")
-
 HEALTH_FUND_LABELS: tuple[str, ...] = ("כללית", "מכבי", "מאוחדת", "לאומית")
-
 ACCIDENT_LOCATION_LABELS: tuple[str, ...] = (
     "במפעל",
     "ת. דרכים בעבודה",
@@ -38,8 +21,7 @@ ACCIDENT_LOCATION_LABELS: tuple[str, ...] = (
     "אחר",
 )
 
-# Literal unions include the empty string so "no checkbox selected" is a
-# valid value for every enum field.
+# Literal unions include "" so "no checkbox selected" is valid.
 GenderLabel = Literal["זכר", "נקבה", ""]
 HealthFundLabel = Literal["כללית", "מכבי", "מאוחדת", "לאומית", ""]
 AccidentLocationLabel = Literal[
@@ -102,8 +84,6 @@ class ExtractedForm(_Model):
     )
 
 
-# --- Hebrew label mapping for the optional UI toggle ------------------------
-
 HEBREW_KEY_MAP: dict[str, str] = {
     "lastName": "שם משפחה",
     "firstName": "שם פרטי",
@@ -141,7 +121,7 @@ HEBREW_KEY_MAP: dict[str, str] = {
 
 
 def to_hebrew_keys(obj: Any) -> Any:
-    """Deep-rename dict keys from the canonical English to the Hebrew labels."""
+    """Deep-rename dict keys from English to Hebrew labels."""
     if isinstance(obj, dict):
         return {HEBREW_KEY_MAP.get(k, k): to_hebrew_keys(v) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -150,11 +130,7 @@ def to_hebrew_keys(obj: Any) -> Any:
 
 
 def openai_json_schema() -> dict[str, Any]:
-    """Return a JSON schema suitable for the Azure OpenAI `json_schema` response_format.
-
-    Azure's strict mode requires every object to set additionalProperties=false
-    and list every property in required. We derive from Pydantic and normalize.
-    """
+    """JSON schema for Azure OpenAI's `json_schema` response_format (strict mode)."""
     schema = ExtractedForm.model_json_schema()
     _normalize(schema)
     for defn in schema.get("$defs", {}).values():
@@ -162,9 +138,7 @@ def openai_json_schema() -> dict[str, Any]:
     return schema
 
 
-# Pydantic attaches these annotations that Azure's strict mode doesn't need.
-# NB: description and examples are also dropped — if you start using them you
-# will need to carve them out here.
+# Keys Azure strict mode does not want.
 _STRIP = frozenset({"default", "title", "examples", "description"})
 
 

@@ -1,11 +1,4 @@
-"""Azure Document Intelligence wrapper.
-
-Runs the ``prebuilt-layout`` model with Markdown output, which already
-handles reading order, renders tables with ``|`` cells, and emits
-selection marks as ``☒`` / ``☐`` glyphs inline. That is the single source
-of truth fed into the extractor — no coordinate post-processing, no
-bespoke per-field parsing.
-"""
+"""Azure Document Intelligence wrapper (prebuilt-layout, Markdown output)."""
 
 from __future__ import annotations
 
@@ -27,18 +20,13 @@ log = logging.getLogger("form_extraction.ocr")
 
 @dataclass
 class OCRResult:
-    """Markdown rendering of the form, as produced by Azure DI."""
     markdown: str
 
 
 def run_ocr(data: bytes, settings: Settings | None = None) -> OCRResult:
-    """Analyse *data* with Azure DI and return its Markdown rendering."""
     s = settings or get_settings()
     if not s.azure_doc_intelligence_endpoint or not s.azure_doc_intelligence_key.get_secret_value():
-        raise RuntimeError(
-            "Azure Document Intelligence is not configured. "
-            "Set AZURE_DOC_INTELLIGENCE_ENDPOINT and AZURE_DOC_INTELLIGENCE_KEY."
-        )
+        raise RuntimeError("Azure Document Intelligence is not configured.")
 
     log.info("ocr.start bytes=%d", len(data))
     t0 = time.perf_counter()
@@ -58,7 +46,6 @@ def run_ocr(data: bytes, settings: Settings | None = None) -> OCRResult:
 
     elapsed_ms = int((time.perf_counter() - t0) * 1000)
     if not result.pages:
-        log.warning("ocr.empty elapsed_ms=%d", elapsed_ms)
         raise RuntimeError("OCR returned no pages; the document may be blank or unreadable.")
 
     markdown = (result.content or "").strip()

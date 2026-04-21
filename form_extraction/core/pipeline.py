@@ -22,41 +22,14 @@ class PipelineResult:
 
 
 def run(data: bytes) -> PipelineResult:
-    """Run OCR, extract fields, validate. Returns the form plus a report."""
     log.info("pipeline.start bytes=%d", len(data))
     t0 = time.perf_counter()
     ocr = run_ocr(data)
     form = extract(ocr.markdown)
     report = validate(form, ocr_text=ocr.markdown)
-    elapsed_ms = int((time.perf_counter() - t0) * 1000)
     log.info(
-        "pipeline.done filled=%d total=%d issues=%d elapsed_ms=%d",
-        report.filled, report.total, len(report.issues), elapsed_ms,
+        "pipeline.done filled=%d/%d issues=%d elapsed_ms=%d",
+        report.filled, report.total, len(report.issues),
+        int((time.perf_counter() - t0) * 1000),
     )
-    if report.issues:
-        for issue in report.issues:
-            log.info(
-                "pipeline.issue field=%s severity=%s msg=%s",
-                issue.field, issue.severity, issue.message,
-            )
-    _log_extracted_fields_debug(form)
     return PipelineResult(form=form, report=report, ocr_text=ocr.markdown)
-
-
-def _log_extracted_fields_debug(form: ExtractedForm) -> None:
-    """DEBUG-only per-field log. PII-safe by default — enable DEBUG to see."""
-    if not log.isEnabledFor(logging.DEBUG):
-        return
-    d = form.model_dump()
-
-    def _walk(node: object, path: str) -> None:
-        if isinstance(node, dict):
-            for k, v in node.items():
-                _walk(v, f"{path}.{k}" if path else k)
-        elif isinstance(node, str):
-            if node.strip():
-                log.debug("pipeline.field %-45s = %r", path, node)
-            else:
-                log.debug("pipeline.field %-45s = <empty>", path)
-
-    _walk(d, "")

@@ -1,55 +1,29 @@
-# Architecture & Design Notes: HMO Chatbot
+# Design Notes — HMO Chatbot
 
-This document details the engineering decisions, state management logic, and retrieval strategies behind the HMO Chatbot microservice.
+## Stateless API
 
----
+The assignment requires statelessness, and it keeps the service trivially scalable: every request carries the full conversation history and the confirmed `user_info`. No server-side session store.
 
-## 🧠 State & Phase Management
+## Two-phase flow
 
-### 1. Completely Stateless API
-The brief mandates statelessness, but there's also a pragmatic reason: any server-side session store introduces sticky routing and a new failure mode for multi-instance deployments. Passing the full conversation history client-side on every request means the API is infinitely horizontally scalable, and a Container App restart can't lose any user's context.
+The chatbot operates in two phases: **collection** (gathering member details) and **qa** (answering benefit questions).
 
-### 2. Tool-Calling for Phase Transitions
-The chatbot operates in two distinct phases: **"collection"** (gathering user details) and **"qa"** (answering benefit questions). 
+In collection, the LLM exposes a `submit_user_info` tool. The system prompt instructs it to summarise the collected fields and wait for the user to confirm (e.g. "כן"/"yes") before calling the tool. When the tool is called, the backend transitions the session to Q&A.
 
-Using an explicit `submit_user_info` OpenAI function-call lets the LLM signal "collection complete" with a strongly-typed payload. The alternative — parsing a keyword like `[DONE]` in the reply text or making a separate classifier call — is less reliable and not self-documenting. The JSON schema (with `enum` constraints for gender / HMO / tier) *is* the strict contract.
+The tool's JSON schema (with enum constraints on gender / HMO / tier and regex on the ID / card numbers) enforces the contract at the API level.
 
-**Data Collected & Validated by LLM:**
-* First & Last name
-* ID number (exactly 9 digits)
-* Gender (זכר / נקבה / אחר)
-* Age (0–120)
-* HMO name (מכבי / מאוחדת / כללית)
-* HMO card number (exactly 9 digits)
-* Insurance tier (זהב / כסף / ארד)
+**Collected fields:** first name, last name, ID number (9 digits), gender (זכר/נקבה/אחר), age (0–120), HMO name (מכבי/מאוחדת/כללית), HMO card number (9 digits), insurance tier (זהב/כסף/ארד).
 
----
+## Knowledge base & retrieval
 
-## 🔍 Knowledge Base & Retrieval Layer
+The knowledge base is 6 HTML files containing service tables. Each file is split into one chunk per `<tr>` plus one intro chunk for the non-table content. Chunking by row preserves the column-to-HMO alignment — a fixed-size splitter would slice through cells.
 
-### 1. Chunking by `<tr>` (Table Rows)
-The raw data consists of 6 HTML files containing service tables. A standard, fixed-size text chunker would cut indiscriminately through table cells, losing the vital column-to-HMO alignment. 
+Chunks are embedded once at startup with `text-embedding-ada-002`. For each Q&A turn the last user message is embedded and the top-k chunks are ranked by cosine similarity (in-memory linear scan — the corpus is ~42 chunks, so a vector DB would be overkill).
 
-Instead, the backend splits every HTML file structurally: one chunk for the `<h2>` intro narrative, and **one chunk per service table row (`<tr>`)**. This ensures every chunk answers a complete semantic question ("How much does X cost at tier Y for HMO Z?") while remaining fully self-contained. Each chunk is also prepended with its parent topic title.
+## Language handling
 
-### 2. Why Retrieval? (Instead of Prompt Stuffing)
-The six HTML files total ~43 KB. This comfortably fits inside GPT-4o's context window, meaning prompt-stuffing would technically work. 
+The system prompt tells the LLM to detect the user's language per-message and reply in kind (Hebrew or English). No hardcoded localisation.
 
-We use Retrieval-Augmented Generation (RAG) anyway because:
-1.  **Production Readiness:** A real HMO service catalogue contains thousands of rows. The retrieval path scales; stuffing does not.
-2.  **Accuracy:** Narrower context measurably reduces mix-ups between tiers and HMOs during spot-checks.
+## Logging
 
-### 3. Why No Vector Database?
-The total corpus generates ~42 chunks. A linear cosine similarity scan using standard math libraries over ~42 vectors executes in the microsecond range. 
-
-Adding a vector database (like Chroma, FAISS, or pgvector) would only add a heavy dependency and a persistence management burden in exchange for performance improvements the user cannot perceive. Relying purely on the native Azure OpenAI SDK and in-memory math perfectly aligns with the "no frameworks" approach, keeping the Docker image and runtime extremely lean.
-
----
-
-## 🛠️ Additional Design Choices
-
-### Multi-Language Mirroring
-The LLM dynamically detects if the user is typing in Hebrew or English per-message and mirrors the language back automatically without requiring hardcoded localization files.
-
-### PII & Logging
-Logs go to both the console and a rotating file (`chatbot.log`). Every request is logged with its `request_id`, phase, token usage, and response time. The shared `common/logger.py` ensures consistent logging structures across both the extraction pipeline and the chatbot, while sensitive `user_info` payloads are omitted from standard INFO logs.
+Console + rotating file (`chatbot.log`). Requests are tagged with a `request_id` and token usage is logged. The shared `common/logger.py` is used by both parts.

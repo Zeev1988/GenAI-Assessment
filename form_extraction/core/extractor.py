@@ -1,16 +1,4 @@
-"""Extract Form 283 fields from OCR Markdown via one Azure OpenAI call.
-
-Single responsibility: send the OCR Markdown to the chat-completions
-endpoint with ``response_format=json_schema`` (strict), parse the reply,
-validate it with Pydantic, and return an :class:`ExtractedForm`.
-
-Strict mode already guarantees the payload matches the schema, but we
-validate again with Pydantic because the schema's string-enum fields
-and nested shapes are cheapest to enforce there. On the rare occasion
-strict mode still produces something Pydantic rejects we issue one
-corrective re-ask with the error inline; beyond that we surface the
-failure to the caller rather than keep retrying blindly.
-"""
+"""Extract Form 283 fields from OCR Markdown via one Azure OpenAI call."""
 
 from __future__ import annotations
 
@@ -28,46 +16,17 @@ from form_extraction.core.schemas import DatePart, ExtractedForm, openai_json_sc
 
 log = logging.getLogger("form_extraction.extractor")
 
-# Fields owned by the nested ``Address`` sub-model. The digit registry
-# addresses them by their short key (``postalCode``), so we route the
-# parser's output to ``form.address`` rather than the top-level form
-# when applying overrides.
 _ADDRESS_FIELDS: frozenset[str] = frozenset(
     {"street", "houseNumber", "entrance", "apartment", "city", "postalCode", "poBox"}
 )
 
-# Top-level fields that are ``DatePart`` sub-models. The anchor parser
-# returns an 8-digit string; the extractor splits it into DD/MM/YYYY
-# via ``parse_date`` and assigns the parts.
 _DATE_FIELDS: frozenset[str] = frozenset(
     {"dateOfBirth", "dateOfInjury", "formFillingDate", "formReceiptDateAtClinic"}
 )
 
 
 def _apply_digit_corrections(form: ExtractedForm, markdown: str) -> ExtractedForm:
-    """Replace LLM values with the anchor-label parser's reads where safe.
-
-    ``digits.py`` is stricter than the LLM: each override-eligible
-    field has a structural validator — calendar-valid DDMMYYYY for
-    dates, 9/10-digit for IDs, prefix + length for phones, 5/7-digit
-    for postal, HH:MM range for time — that the parser's output has
-    to pass before it is returned. When the parser returns a value,
-    that value is trustworthy enough to prefer over the LLM's read:
-    the LLM can get DDMMYYYY pair orderings wrong, hallucinate
-    plausible-looking phones, or re-interpret RTL-emitted digit rows.
-
-    When the anchor is displaced by OCR reading order (seen on
-    sample ex2 for ``idNumber`` and ex3 for ``dateOfBirth``) the
-    parser returns ``None`` and the LLM's value survives. This is
-    why the override is safe despite being unconditional: the parser
-    only speaks when it is confident.
-
-    Short address fields (``apartment``, ``entrance``, ``houseNumber``)
-    are *not* on the override path — their structural check is a
-    bare "1–4 digits" test that a wrong digit run in the scan window
-    can pass by coincidence. ``validate.py`` surfaces a warning on
-    disagreement instead, and the LLM's value stays.
-    """
+    """Replace LLM values with the anchor-label parser's reads where it succeeds."""
     top_updates: dict[str, object] = {}
     address_updates: dict[str, str] = {}
 
@@ -104,13 +63,10 @@ def _apply_digit_corrections(form: ExtractedForm, markdown: str) -> ExtractedFor
 
 
 def extract(markdown: str, settings: Settings | None = None) -> ExtractedForm:
-    """Return an ExtractedForm built from one (or at most two) LLM calls."""
+    """Run one (or at most two) LLM calls and return an ExtractedForm."""
     s = settings or get_settings()
     if not s.azure_openai_endpoint or not s.azure_openai_key.get_secret_value():
-        raise RuntimeError(
-            "Azure OpenAI is not configured. "
-            "Set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_KEY."
-        )
+        raise RuntimeError("Azure OpenAI is not configured.")
 
     schema = openai_json_schema()
     client = AzureOpenAI(
@@ -135,19 +91,13 @@ def extract(markdown: str, settings: Settings | None = None) -> ExtractedForm:
             {
                 "role": "user",
                 "content": (
-                    "Your previous JSON failed schema validation:\n"
-                    f"{exc}\n"
-                    "Return corrected JSON that matches the schema exactly. "
-                    "Keep every field you had right; only fix the validation errors. "
-                    "Output JSON only."
+                    f"Your previous JSON failed schema validation:\n{exc}\n"
+                    "Return corrected JSON that matches the schema exactly. Output JSON only."
                 ),
             }
         )
         payload = _call(client, s.azure_openai_deployment, messages, schema)
         form = ExtractedForm.model_validate(payload)
-        form = _apply_digit_corrections(form, markdown)
-        log.info("extract.done retried=1 elapsed_ms=%d", int((time.perf_counter() - t0) * 1000))
-        return form
 
     form = _apply_digit_corrections(form, markdown)
     log.info("extract.done elapsed_ms=%d", int((time.perf_counter() - t0) * 1000))

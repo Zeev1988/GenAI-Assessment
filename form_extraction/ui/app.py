@@ -1,13 +1,4 @@
-"""Streamlit UI for Form 283 extraction.
-
-Imports only from `form_extraction.core`. The UI layer does three things:
-  * surfaces the extracted JSON (canonical + Hebrew-labelled),
-  * shows the raw OCR next to it for human-in-the-loop accuracy review,
-  * surfaces format issues from the validator.
-
-Run with:
-    streamlit run form_extraction/ui/app.py
-"""
+"""Streamlit UI for Form 283 extraction."""
 
 from __future__ import annotations
 
@@ -22,21 +13,15 @@ from common import get_logger
 from form_extraction.core.pipeline import run
 from form_extraction.core.schemas import to_hebrew_keys
 
-# Streamlit reruns the script on every interaction, but the logger factory
-# deduplicates handlers on subsequent calls so we only configure once.
 log = get_logger("form_extraction.ui")
 
 st.set_page_config(page_title="Form 283 Extractor", layout="wide")
 st.title("Bituach Leumi – Form 283 Extractor")
 st.caption(
-    "Upload a filled form (PDF/JPG/PNG). "
-    "Azure Document Intelligence runs OCR, GPT-4o returns a JSON payload, "
-    "and a small rule check flags obvious format errors."
+    "Upload a filled form (PDF/JPG/PNG). Azure Document Intelligence runs OCR, "
+    "GPT-4o returns JSON, and a small rule check flags format errors."
 )
 
-# Look for sample PDFs in the two locations we support: the assignment's
-# original `phase1_data/` next to the repo, and the test fixtures shipped
-# under `tests/test_data/phase1_data/`.
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SAMPLE_DIRS = (
     _PROJECT_ROOT / "test_data",
@@ -55,18 +40,14 @@ def _find_sample() -> Path | None:
 
 
 def _describe_error(exc: BaseException) -> str:
-    """Turn SDK / pipeline errors into a short actionable message."""
     if isinstance(exc, AuthenticationError):
-        return (
-            "Azure OpenAI rejected the API key. "
-            "Check AZURE_OPENAI_KEY and AZURE_OPENAI_ENDPOINT in your .env."
-        )
+        return "Azure OpenAI rejected the API key. Check AZURE_OPENAI_KEY / AZURE_OPENAI_ENDPOINT."
     if isinstance(exc, RateLimitError):
         return "Azure OpenAI rate-limited the request. Wait a moment and try again."
     if isinstance(exc, APIConnectionError):
         return "Could not reach Azure OpenAI. Check your network and endpoint URL."
     if isinstance(exc, APIStatusError):
-        return f"Azure OpenAI returned HTTP {exc.status_code}. Try again or check the service status."
+        return f"Azure OpenAI returned HTTP {exc.status_code}."
     if isinstance(exc, ValidationError):
         return "The model returned JSON that does not match the expected schema."
     if isinstance(exc, RuntimeError):
@@ -93,14 +74,13 @@ elif sample_path is not None:
         file_label = sample_path.name
 
 if file_bytes is None:
-    st.info("Upload a form to get started." + ("" if sample_path else " (No bundled sample available.)"))
+    st.info("Upload a form to get started.")
     st.stop()
 
 if st.button("Extract fields", type="primary"):
     log.info("ui.extract label=%s bytes=%d", file_label, len(file_bytes))
     try:
         with st.spinner("Running OCR..."):
-            # The pipeline runs end-to-end; this spinner covers the whole trip.
             result = run(file_bytes)
     except Exception as exc:
         log.exception("ui.extract_failed label=%s", file_label)
@@ -142,7 +122,7 @@ with tab_json:
     )
 
 with tab_ocr:
-    st.caption("Raw OCR output — compare side-by-side with the extracted JSON to verify accuracy.")
+    st.caption("Raw OCR output — compare with the extracted JSON.")
     st.code(result["ocr_text"], language="markdown")
 
 with tab_issues:

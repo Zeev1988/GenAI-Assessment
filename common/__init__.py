@@ -1,9 +1,4 @@
-"""Utilities shared by both Part 1 (form_extraction) and Part 2 (chatbot).
-
-Keeping the shared surface tiny on purpose: one Azure-settings base class
-and one logger factory.  Anything larger belongs in the package that owns
-the specific concern.
-"""
+"""Utilities shared by Part 1 (form_extraction) and Part 2 (chatbot)."""
 
 from common.config import ENV_FILE, PROJECT_ROOT, AzureOpenAISettings
 from common.logger import get_logger

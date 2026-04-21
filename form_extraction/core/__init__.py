@@ -1,7 +1,4 @@
-"""Framework-agnostic extraction pipeline.
-
-Nothing in this package imports from `form_extraction.ui`. Keep it that way.
-"""
+"""Framework-agnostic extraction pipeline."""
 
 from form_extraction.core.pipeline import PipelineResult, run
 from form_extraction.core.schemas import (
